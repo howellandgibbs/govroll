@@ -98,6 +98,80 @@ describe("computeMomentum", () => {
     expect(result.tier).toBe("ADVANCING");
   });
 
+  it("bill that passed one chamber but has had no major action in 180+ days → STALLED", () => {
+    const stale = computeMomentum(
+      {
+        ...baseInputs,
+        currentStatus: "pass_over_house",
+        latestActionDate: new Date("2026-04-01T00:00:00Z"), // recent noise
+        latestMajorActionDate: new Date("2025-09-15T00:00:00Z"), // 212d ago
+      },
+      119,
+      now,
+    );
+    expect(stale.tier).toBe("STALLED");
+
+    // Same bill with a floor action scheduled stays ADVANCING.
+    const scheduled = computeMomentum(
+      {
+        ...baseInputs,
+        currentStatus: "pass_over_house",
+        latestActionDate: new Date("2026-04-01T00:00:00Z"),
+        latestMajorActionDate: new Date("2025-09-15T00:00:00Z"),
+        hasImminentFloorAction: true,
+      },
+      119,
+      now,
+    );
+    expect(scheduled.tier).toBe("ADVANCING");
+  });
+
+  it("agreed-to simple resolution → terminal (ENACTED) tier, not ADVANCING; scores below a fresh enactment", () => {
+    const resolution = computeMomentum(
+      {
+        ...baseInputs,
+        billId: "sres837-119",
+        currentStatus: "passed_simpleres",
+        latestActionDate: new Date("2026-04-14T00:00:00Z"),
+      },
+      119,
+      now,
+    );
+    expect(resolution.tier).toBe("ENACTED");
+    expect(resolution.deathReason).toBeNull();
+
+    const law = computeMomentum(
+      {
+        ...baseInputs,
+        currentStatus: "enacted_signed",
+        latestActionDate: new Date("2026-04-14T00:00:00Z"),
+      },
+      119,
+      now,
+    );
+    expect(resolution.score).toBeLessThan(law.score);
+
+    // A fresh chamber-passed bill should outrank a fresh commemorative
+    // resolution in Trending.
+    const passedBill = computeMomentum(
+      {
+        ...baseInputs,
+        currentStatus: "pass_over_house",
+        latestActionDate: new Date("2026-04-14T00:00:00Z"),
+      },
+      119,
+      now,
+    );
+    expect(resolution.score).toBeLessThan(passedBill.score);
+
+    const concurrent = computeMomentum(
+      { ...baseInputs, currentStatus: "passed_concurrentres" },
+      119,
+      now,
+    );
+    expect(concurrent.tier).toBe("ENACTED");
+  });
+
   it("pocket-vetoed bill → DEAD with VETOED", () => {
     const result = computeMomentum(
       {

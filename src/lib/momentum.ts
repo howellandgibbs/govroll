@@ -258,6 +258,28 @@ export function computeMomentum(
     return { score, tier: "ENACTED", daysSinceLastAction, deathReason: null };
   }
 
+  // Agreed-to simple / concurrent resolutions: terminal success for their
+  // bill type. A simple resolution never goes to the other chamber or the
+  // President — "passed" is the end of its route, so it can't be ADVANCING
+  // (there's nothing left to advance to). Tier ENACTED here means "this
+  // measure's process is complete", and the tier is never rendered as the
+  // word "Enacted" (the stage label comes from currentStatus). Score starts
+  // lower than a true enactment so a fresh commemorative resolution sits
+  // just below a fresh chamber-passed bill in Trending instead of on top
+  // of it, then decays out of the way.
+  if (
+    inputs.currentStatus === "passed_simpleres" ||
+    inputs.currentStatus === "passed_concurrentres"
+  ) {
+    const floor = 10;
+    const peak = 50;
+    const halfLife = 45;
+    const score = Math.round(
+      floor + (peak - floor) * Math.pow(0.5, daysSinceLastAction / halfLife),
+    );
+    return { score, tier: "ENACTED", daysSinceLastAction, deathReason: null };
+  }
+
   // Prior Congress: constitutionally dead, bills do not carry over.
   if (
     inputs.congressNumber !== null &&
@@ -383,9 +405,17 @@ export function computeMomentum(
   // told a bill scheduled for tomorrow is stalled.
 
   let tier: MomentumTier;
-  if (floor >= 28) {
-    // Passed at least one chamber — structurally advancing.
+  if (
+    floor >= 28 &&
+    (daysSinceLastMajor <= 180 || inputs.hasImminentFloorAction)
+  ) {
+    // Passed at least one chamber and still moving — structurally advancing.
+    // A bill that cleared the House but has sat in the Senate for six
+    // months isn't advancing anymore; it falls through to STALLED below
+    // (and to DEAD via the 365-day silence override above that).
     tier = "ADVANCING";
+  } else if (floor >= 28) {
+    tier = "STALLED";
   } else if (daysSinceLastMajor <= 60 || inputs.hasImminentFloorAction) {
     // Congress cadence is monthly; 60 days covers a normal markup cycle.
     tier = "ACTIVE";
