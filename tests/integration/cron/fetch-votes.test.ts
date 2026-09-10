@@ -414,29 +414,86 @@ describe("GET /api/cron/fetch-votes", () => {
     expect(votes).toHaveLength(1);
   });
 
-  it("returns 500 when GovTrack is down (systemic failure is not laundered into ok)", async () => {
-    // The core regression: a GovTrack/DB outage used to be swallowed and the
-    // cron returned {ok:true}/200, so GH Actions went green over a broken run.
-    // It must now surface as a 500 so the route fires reportError and the
-    // Action fails red. /vote returns a roll call so the walk reaches the
-    // voter fetch — the call that fails here.
+  /** One roll call on the day so the walk reaches /vote_voter — the call
+   *  that fails in the transient-error tests below. */
+  const oneRollCall = () =>
+    http.get("https://www.govtrack.us/api/v2/vote", () =>
+      HttpResponse.json({
+        objects: [
+          {
+            created: "2026-06-09T18:00:00",
+            chamber: "senate",
+            number: 1,
+            congress: 119,
+          },
+        ],
+        meta: { total_count: 1 },
+      }),
+    );
+
+  it("stops cleanly (200, upstreamPaused, cursor preserved) on a GovTrack 5xx", async () => {
+    // A GovTrack 5xx is transient backpressure, not a failure. It used to
+    // propagate to a 500 + a paging alert email on every occurrence (1-3×/day
+    // in prod: "Request failed with status code 500"). Now the run ends green
+    // with the cursor untouched, so the next hourly tick re-walks the day; a
+    // SUSTAINED outage is the ingest-health watchdog's job (stale cursor).
+    const db = getTestPrisma();
+    const cursorDate = dayjs().subtract(5, "day").startOf("day").toDate();
+    await db.ingestCursor.create({
+      data: { key: "fetch-votes", cursor: cursorDate },
+    });
+
     server.use(
-      http.get("https://www.govtrack.us/api/v2/vote", () =>
-        HttpResponse.json({
-          objects: [
-            {
-              created: "2026-06-09T18:00:00",
-              chamber: "senate",
-              number: 1,
-              congress: 119,
-            },
-          ],
-          meta: { total_count: 1 },
-        }),
-      ),
+      oneRollCall(),
       http.get(
         "https://www.govtrack.us/api/v2/vote_voter",
         () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+
+    const res = await invokeCron(GET);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.upstreamPaused).toBe(true);
+    expect(body.daysIngested).toBe(0);
+
+    // Nothing written, cursor exactly where it was.
+    expect(await db.representativeVote.count()).toBe(0);
+    const row = await db.ingestCursor.findUnique({
+      where: { key: "fetch-votes" },
+    });
+    expect(row?.cursor.toISOString()).toBe(cursorDate.toISOString());
+  });
+
+  it("stops cleanly on a GovTrack network drop (the 15s timeout / socket hang up class)", async () => {
+    // The most common prod page: axios "timeout of 15000ms exceeded", "socket
+    // hang up", ECONNRESET — an AxiosError with no HTTP response at all.
+    server.use(
+      oneRollCall(),
+      http.get("https://www.govtrack.us/api/v2/vote_voter", () =>
+        HttpResponse.error(),
+      ),
+    );
+
+    const res = await invokeCron(GET);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.upstreamPaused).toBe(true);
+    expect(await getTestPrisma().ingestCursor.count()).toBe(0);
+  });
+
+  it("still returns 500 on a non-transient GovTrack error (a 4xx won't fix itself)", async () => {
+    // The original regression guard, narrowed: a systemic failure must not be
+    // laundered into ok. A 4xx (malformed request, changed API) is not
+    // backpressure — it surfaces as a 500 so the route fires reportError and
+    // the Action fails red.
+    server.use(
+      oneRollCall(),
+      http.get(
+        "https://www.govtrack.us/api/v2/vote_voter",
+        () => new HttpResponse("bad request", { status: 400 }),
       ),
     );
 

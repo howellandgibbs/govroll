@@ -72,10 +72,21 @@ export async function GET(request: Request) {
   const start = Date.now();
 
   try {
-    await fetchVotesFunction({ since, deadlineMs: DEADLINE_MS });
+    const result = await fetchVotesFunction({ since, deadlineMs: DEADLINE_MS });
     const ms = Date.now() - start;
-    console.log(`[fetch-votes cron] completed in ${ms}ms`);
-    return NextResponse.json({ ok: true, ms });
+    // A transient-upstream stop (GovTrack 5xx / 429 / network drop, incl. the
+    // 15s socket timeout) is expected backpressure, not a failure — keep it a
+    // green 200 (cursor preserved, next hourly run resumes) but log loudly so
+    // it's visible in the function logs without paging. Previously these
+    // became a 500 + an alert email on every occurrence (1-3×/day); a
+    // SUSTAINED outage is caught by the ingest-health watchdog (stale cursor).
+    if (result.upstreamPaused) {
+      console.warn(
+        `[fetch-votes cron] stopped on a transient GovTrack error (5xx/429/network); cursor preserved, resuming next run`,
+      );
+    }
+    console.log(`[fetch-votes cron] completed in ${ms}ms`, result);
+    return NextResponse.json({ ok: true, ms, ...result });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`[fetch-votes cron] failed:`, msg);

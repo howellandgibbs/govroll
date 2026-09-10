@@ -5,6 +5,7 @@ import {
   fetchGovTrackBill,
   delay,
 } from "../lib/govtrack";
+import { isTransientUpstreamError } from "../lib/congress-api";
 import { createStandalonePrisma } from "../lib/prisma-standalone";
 import dayjs, { type Dayjs } from "dayjs";
 
@@ -38,6 +39,20 @@ export interface FetchVotesOptions {
   deadlineMs?: number;
 }
 
+export interface FetchVotesResult {
+  /** Days whose roll calls were fully ingested and whose cursor advanced. */
+  daysIngested: number;
+  /** Stopped between/within days because `deadlineMs` was spent. */
+  timedOut: boolean;
+  /** Stopped early on a TRANSIENT GovTrack error — a 5xx, a 429, or a network
+   *  drop (15s socket timeout, "socket hang up", ECONNRESET). Not a failure:
+   *  the cursor stays at the last fully-ingested day and the next hourly run
+   *  re-walks from there. A sustained outage surfaces via the ingest-health
+   *  watchdog (cursor stale > 8h), not here. Mirrors fetch-bills. */
+  upstreamPaused: boolean;
+  elapsedMs: number;
+}
+
 interface GovTrackBillData {
   bill_type: string;
   number: number;
@@ -61,9 +76,14 @@ type VoteRecord = {
 };
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
+export async function fetchVotesFunction(
+  opts: FetchVotesOptions = {},
+): Promise<FetchVotesResult> {
   const started = Date.now();
   const deadlineMs = opts.deadlineMs ?? Number.POSITIVE_INFINITY;
+  let daysIngested = 0;
+  let timedOut = false;
+  let upstreamPaused = false;
 
   try {
     const now = dayjs();
@@ -79,65 +99,57 @@ export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
         console.log(
           `[fetch-votes] deadline reached at ${currentDate.format("YYYY-MM-DD")}; resuming next run`,
         );
+        timedOut = true;
         break;
       }
 
       const nextDate = currentDate.add(1, "day");
       const dayLabel = currentDate.format("YYYY-MM-DD");
 
-      // Enumerate the day's roll calls, then pull each one's voters in its
-      // own query. We can't just page /vote_voter by date: GovTrack rejects
-      // offsets > 1000 ("Offset > 1000 is not permitted", HTTP 400), and a
-      // busy day stacks several roll calls (a House roll call alone is ~435
-      // voter rows), so a date-windowed walk marches past the cap and 400s —
-      // which, because the cursor only advances after a day's writes, would
-      // wedge the cron on that day forever. A single roll call is always
-      // under the cap, and all its voters share one `created` second, so a
-      // [created, created+1s) window isolates exactly that roll call.
-      const rollCalls = await fetchGovTrackVotes({
-        created__gte: dayLabel,
-        created__lt: nextDate.format("YYYY-MM-DD"),
-        order_by: "created",
-        limit: ROLL_CALLS_PAGE_SIZE,
-      });
-
-      // Distinct start seconds — two roll calls in the same second (rare) get
-      // one window, so we never fetch the same voters twice.
-      const rollCallStarts = [
-        ...new Set(
-          (rollCalls as any[])
-            .map((rc) => rc?.created)
-            .filter((c: unknown): c is string => typeof c === "string"),
-        ),
-      ];
-
-      const voteVoters: any[] = [];
+      // The day's GovTrack reads (roll-call list + per-roll-call voters) are
+      // fenced together: a transient upstream error anywhere in them is
+      // backpressure, not a failure. Stop cleanly with the cursor still at the
+      // last completed day — this day is re-walked in full next run (the
+      // writes are idempotent) — instead of throwing to a 500 that paged an
+      // alert email on every GovTrack hiccup (1-3×/day in prod). Non-transient
+      // errors (a 4xx, a bug) still propagate. Sustained outages are the
+      // ingest-health watchdog's job.
+      let voteVoters: any[];
+      let rollCallCount: number;
       let abandonedDay = false;
-      for (const startedAt of rollCallStarts) {
-        // Budget can run out mid-day on a deep backfill. Drop this day's
-        // partial work and stop without advancing the cursor, so the next run
-        // re-walks the whole day (idempotent) rather than skipping the roll
-        // calls we hadn't fetched yet.
-        if (Date.now() - started > deadlineMs) {
+      try {
+        const day = await fetchDayVoters(dayLabel, nextDate, () => {
+          if (Date.now() - started <= deadlineMs) return false;
+          // Budget can run out mid-day on a deep backfill. Drop this day's
+          // partial work and stop without advancing the cursor, so the next
+          // run re-walks the whole day (idempotent) rather than skipping the
+          // roll calls we hadn't fetched yet.
           console.log(
             `[fetch-votes] deadline reached mid-day at ${dayLabel}; redoing it next run`,
           );
-          abandonedDay = true;
+          return true;
+        });
+        voteVoters = day.voteVoters;
+        rollCallCount = day.rollCallCount;
+        abandonedDay = day.abandoned;
+      } catch (err) {
+        if (isTransientUpstreamError(err)) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[fetch-votes] transient GovTrack error on ${dayLabel} (${msg}); cursor preserved, resuming next run`,
+          );
+          upstreamPaused = true;
           break;
         }
-        const voters = await fetchGovTrackVoteVoters({
-          created__gte: startedAt,
-          created__lt: dayjs(startedAt)
-            .add(1, "second")
-            .format("YYYY-MM-DDTHH:mm:ss"),
-        });
-        voteVoters.push(...(voters as any[]));
-        await delay(250);
+        throw err;
       }
-      if (abandonedDay) break;
+      if (abandonedDay) {
+        timedOut = true;
+        break;
+      }
 
       console.log(
-        `Fetched ${voteVoters.length} votes from ${dayLabel} across ${rollCallStarts.length} roll calls`,
+        `Fetched ${voteVoters.length} votes from ${dayLabel} across ${rollCallCount} roll calls`,
       );
 
       if (voteVoters.length > 0) {
@@ -146,13 +158,15 @@ export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
 
       // Advance the cursor only after the day's writes succeed. If a later
       // day throws, the cursor stays at the last fully-ingested day rather
-      // than jumping to now and stranding the gap. Errors propagate so the
-      // caller (cron route) surfaces a 500 instead of a false success.
+      // than jumping to now and stranding the gap. Non-transient errors
+      // propagate so the caller (cron route) surfaces a 500 instead of a
+      // false success.
       await prisma.ingestCursor.upsert({
         where: { key: CURSOR_KEY },
         update: { cursor: nextDate.toDate() },
         create: { key: CURSOR_KEY, cursor: nextDate.toDate() },
       });
+      daysIngested++;
 
       await delay(500);
       currentDate = nextDate;
@@ -162,6 +176,71 @@ export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
   } finally {
     await prisma.$disconnect();
   }
+
+  return {
+    daysIngested,
+    timedOut,
+    upstreamPaused,
+    elapsedMs: Date.now() - started,
+  };
+}
+
+/**
+ * One day's GovTrack reads. Enumerates the day's roll calls, then pulls each
+ * roll call's voters in its own query. We can't just page /vote_voter by
+ * date: GovTrack rejects offsets > 1000 ("Offset > 1000 is not permitted",
+ * HTTP 400), and a busy day stacks several roll calls (a House roll call
+ * alone is ~435 voter rows), so a date-windowed walk marches past the cap and
+ * 400s — which, because the cursor only advances after a day's writes, would
+ * wedge the cron on that day forever. A single roll call is always under the
+ * cap, and all its voters share one `created` second, so a
+ * [created, created+1s) window isolates exactly that roll call.
+ *
+ * `shouldAbandon` is polled between roll calls; when it returns true the
+ * partial day is dropped (`abandoned: true`) so the caller can stop without
+ * advancing the cursor.
+ */
+async function fetchDayVoters(
+  dayLabel: string,
+  nextDate: Dayjs,
+  shouldAbandon: () => boolean,
+): Promise<{ voteVoters: any[]; rollCallCount: number; abandoned: boolean }> {
+  const rollCalls = await fetchGovTrackVotes({
+    created__gte: dayLabel,
+    created__lt: nextDate.format("YYYY-MM-DD"),
+    order_by: "created",
+    limit: ROLL_CALLS_PAGE_SIZE,
+  });
+
+  // Distinct start seconds — two roll calls in the same second (rare) get
+  // one window, so we never fetch the same voters twice.
+  const rollCallStarts = [
+    ...new Set(
+      (rollCalls as any[])
+        .map((rc) => rc?.created)
+        .filter((c: unknown): c is string => typeof c === "string"),
+    ),
+  ];
+
+  const voteVoters: any[] = [];
+  for (const startedAt of rollCallStarts) {
+    if (shouldAbandon()) {
+      return {
+        voteVoters,
+        rollCallCount: rollCallStarts.length,
+        abandoned: true,
+      };
+    }
+    const voters = await fetchGovTrackVoteVoters({
+      created__gte: startedAt,
+      created__lt: dayjs(startedAt)
+        .add(1, "second")
+        .format("YYYY-MM-DDTHH:mm:ss"),
+    });
+    voteVoters.push(...(voters as any[]));
+    await delay(250);
+  }
+  return { voteVoters, rollCallCount: rollCallStarts.length, abandoned: false };
 }
 
 /**

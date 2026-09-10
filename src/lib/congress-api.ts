@@ -62,6 +62,15 @@ export function isTransientCongressError(error: unknown): boolean {
   return status === 429 || status >= 500;
 }
 
+/**
+ * The classifier above is upstream-agnostic — it inspects the axios error
+ * shape, not the host — so the GovTrack crons (fetch-votes,
+ * fetch-representatives) use it under this name. Same three families: a
+ * GovTrack 5xx, a 429, or a network drop (the "timeout of 15000ms exceeded" /
+ * "socket hang up" / ECONNRESET class that paged fetch-votes 1-3×/day).
+ */
+export const isTransientUpstreamError = isTransientCongressError;
+
 /** Parse a Retry-After header (delta-seconds or HTTP-date) into milliseconds.
  *  Returns null when the header is absent or unparseable. */
 function parseRetryAfterMs(error: unknown): number | null {
