@@ -37,35 +37,54 @@ export function SystemBanner() {
   return (
     <section
       aria-label="Session status"
-      className="bg-gold/30 border-ink relative overflow-hidden border-b-2 min-[900px]:min-h-[160px]"
+      className="bg-gold/30 border-ink relative overflow-hidden border-b-2"
     >
-      {/* Illustration — anchored bottom-right, bleeding off the right edge.
-          Decorative only; the text carries the whole fact. Hidden below
-          900px, where the banner becomes text-only. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/brand/illos/illo-2.jpg"
-        alt=""
-        aria-hidden
-        className="border-ink absolute right-0 bottom-0 hidden h-full max-w-[44%] border-l-2 object-cover object-left-bottom min-[900px]:block"
-      />
+      {/* The text/illustration split is measured against the centered
+          max-w-6xl wrapper, not the full-bleed section: percentage padding
+          on the wrapper resolves against the *section's* width, so at wide
+          viewports a `pr-[46%]` ate the whole capped wrapper and the copy
+          wrapped one word per line. Anchoring the image to the wrapper keeps
+          the copy at ≥52% of the wrapper no matter how wide the window is. */}
+      <div className="relative mx-auto flex max-w-6xl flex-col justify-center px-6 py-7 min-[900px]:min-h-[160px]">
+        {/* Illustration — starts at 54% of the wrapper and bleeds off the
+            right edge of the viewport (`right: calc(50% - 50vw)` reaches
+            from the centered wrapper to the window edge; the section's
+            overflow-hidden clips the rest). Decorative only; the text
+            carries the whole fact. Hidden below 900px, where the banner
+            becomes text-only. */}
+        {/* The frame is a div, not the <img>: an absolutely positioned
+            replaced element with auto width keeps its intrinsic width and
+            ignores `right`, so only a non-replaced box stretches between
+            the two insets. */}
+        <div
+          aria-hidden
+          className="border-ink absolute top-0 right-[calc(50%-50vw)] bottom-0 left-[54%] hidden border-l-2 min-[900px]:block"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/brand/illos/illo-2.jpg"
+            alt=""
+            className="h-full w-full object-cover object-left-bottom"
+          />
+        </div>
 
-      <div className="relative mx-auto flex max-w-6xl flex-col justify-center gap-1.5 px-6 py-7 min-[900px]:min-h-[160px] min-[900px]:pr-[46%]">
-        <p className="text-ink/70 text-[10.5px] font-bold tracking-[0.18em] uppercase">
-          Session status
-        </p>
-        <h2 className="wdth-118 text-ink text-[30px] leading-none tracking-tight">
-          Congress in recess
-        </h2>
-        <p className="text-ink max-w-xl text-sm leading-relaxed">
-          {detail ? `${detail}. ` : ""}
-          {resolved.nextTransitionLabel
-            ? `${resolved.nextTransitionLabel}. `
-            : ""}
-          Votes and floor action are paused, so the latest activity below may
-          look a few days old — new bills still appear as they&apos;re
-          introduced.
-        </p>
+        <div className="flex flex-col gap-1.5 min-[900px]:max-w-[52%]">
+          <p className="text-ink/70 text-[10.5px] font-bold tracking-[0.18em] uppercase">
+            Session status
+          </p>
+          <h2 className="wdth-118 text-ink text-[30px] leading-none tracking-tight">
+            Congress in recess
+          </h2>
+          <p className="text-ink max-w-xl text-sm leading-relaxed">
+            {detail ? `${detail}. ` : ""}
+            {resolved.nextTransitionLabel
+              ? `${resolved.nextTransitionLabel}. `
+              : ""}
+            Votes and floor action are paused, so the latest activity below may
+            look a few days old — new bills still appear as they&apos;re
+            introduced.
+          </p>
+        </div>
       </div>
     </section>
   );
