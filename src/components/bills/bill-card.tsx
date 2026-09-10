@@ -169,14 +169,13 @@ function tierTreatment(
         momentumChip: { label: "Stalled", className: outlineChip },
         silenceNote: silence,
       };
+    // Live tiers get no chip. The right rail's stage label and route dots
+    // already say where the bill is; a chip that repeats "it's moving" on
+    // every card in the default (live-only) feed is noise, and for a bill
+    // that passed a chamber it merely restates the "Passed"/"In Progress"
+    // stage. Chips are reserved for the tiers that add information the
+    // stage can't: stalled, dormant, dead.
     case "ADVANCING":
-      return {
-        cardClass: "",
-        momentumChip: {
-          label: "Advancing",
-          className: "border-rule text-ink border",
-        },
-      };
     case "ENACTED":
     case "ACTIVE":
     case null:
