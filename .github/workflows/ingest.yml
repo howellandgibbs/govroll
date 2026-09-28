@@ -45,7 +45,11 @@ on:
     - cron: "25 * * * *" # refresh-bill-metadata      (hourly at :25)
     - cron: "0 * * * *" # evaluate-budget            (hourly, on the hour)
     - cron: "0 10 * * 1" # fetch-representatives      (weekly, Mon 10:00 UTC)
-    - cron: "20 * * * *" # embed-large-bills          (hourly)
+    # embed-large-bills is paused (manual-only via workflow_dispatch). Its
+    # embeddings only feed AI chat RAG, which has seen almost no use, yet the
+    # chunks already fill ~2.5 GB of the 8 GB database (growing ~1 GB/month)
+    # and each hourly run spends Vercel free-tier Active CPU. Re-enable at :20
+    # once chat usage justifies it and the storage format is slimmed.
     - cron: "30 3 * * *" # cleanup-expired-cache      (daily 03:30 UTC)
     # Freshness watchdog — pages only when a cursor or backfill is genuinely
     # stuck for hours (sustained quota / a stopped cron / the #139 silent-stall
@@ -121,7 +125,6 @@ jobs:
             "25 * * * *")    echo "endpoint=refresh-bill-metadata"     >> "$GITHUB_OUTPUT" ;;
             "0 * * * *")     echo "endpoint=evaluate-budget"           >> "$GITHUB_OUTPUT" ;;
             "0 10 * * 1")    echo "endpoint=fetch-representatives"     >> "$GITHUB_OUTPUT" ;;
-            "20 * * * *")    echo "endpoint=embed-large-bills"         >> "$GITHUB_OUTPUT" ;;
             "30 3 * * *")    echo "endpoint=cleanup-expired-cache"     >> "$GITHUB_OUTPUT" ;;
             "55 * * * *")    echo "endpoint=ingest-health"             >> "$GITHUB_OUTPUT" ;;
             *)

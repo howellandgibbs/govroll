@@ -25,6 +25,7 @@ export async function seedBill(
     fullText: string;
     lastMetadataRefreshAt: Date;
     lastActionRefreshAt: Date;
+    textFetchAttemptedAt: Date;
     latestActionText: string;
     latestActionDate: Date;
     currentChamber: string;

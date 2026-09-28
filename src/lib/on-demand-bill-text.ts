@@ -1,8 +1,8 @@
 import { after } from "next/server";
-import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { fetchBillTextFunction } from "@/scripts/fetch-bill-text";
-import { billHref } from "@/lib/bills/url";
+import { parseBillIdentifier } from "@/lib/bills/url";
+import { getCurrentCongress } from "@/lib/momentum";
 
 /**
  * Cold-start threshold — if we haven't tried to fetch a bill's text within
@@ -15,10 +15,34 @@ import { billHref } from "@/lib/bills/url";
 const TRY_AGAIN_AFTER_MS = 60 * 60 * 1000; // 1 hour
 
 /**
+ * How long the text backfill cron waits before re-trying a bill from a
+ * Congress that has already ended. Such a bill's text is either published
+ * already (and fetched on the first attempt) or never coming — pre-2003 bills
+ * have no machine-readable text at all — so ~12.5k of them cycling through the
+ * hourly queue, plus page views re-trying them hourly, burned ~1,700 fetch
+ * attempts a day (each several Congress.gov calls on the shared 5k/hr key and
+ * a dozen GovInfo probes) for nothing.
+ */
+export const ENDED_CONGRESS_TEXT_RETRY_DAYS = 180;
+
+/** True when the bill belongs to a Congress that has already ended. */
+export function isFromEndedCongress(
+  billId: string,
+  now: Date = new Date(),
+): boolean {
+  const parsed = parseBillIdentifier(billId);
+  return parsed !== null && parsed.congress < getCurrentCongress(now);
+}
+
+/**
  * If `bill` has no text and we haven't tried recently, kick off a fetch
  * after the response returns. Uses Next's `after()` so the fetch runs as
  * a background task on the same Vercel function instance (Fluid Compute)
  * without blocking the page render.
+ *
+ * Bills from an ended Congress get one attempt here, ever; after that the
+ * backfill cron's slow lane (ENDED_CONGRESS_TEXT_RETRY_DAYS) owns retries.
+ * Those page views are almost all crawlers sweeping the archive.
  *
  * Concurrency: we atomically "claim" the fetch by bumping the attempt
  * timestamp via updateMany WHERE the stale-timestamp predicate still
@@ -33,11 +57,14 @@ const TRY_AGAIN_AFTER_MS = 60 * 60 * 1000; // 1 hour
 export function maybeFetchBillTextInBackground(bill: {
   id: number;
   billId: string;
-  title: string;
   hasFullText: boolean;
   textFetchAttemptedAt: Date | null;
 }): void {
   if (bill.hasFullText) return;
+
+  if (bill.textFetchAttemptedAt != null && isFromEndedCongress(bill.billId)) {
+    return;
+  }
 
   const staleAt = new Date(Date.now() - TRY_AGAIN_AFTER_MS);
   if (
@@ -67,9 +94,9 @@ export function maybeFetchBillTextInBackground(bill: {
 
       // Share the request's long-lived pooled client — this can race the cron
       // over the same shared client, so fetchBillTextFunction must not
-      // disconnect a client it didn't create.
+      // disconnect a client it didn't create. Both bill pages render per
+      // request, so there's no cached page to revalidate afterwards.
       await fetchBillTextFunction(bill.billId, 1, prisma);
-      revalidatePath(billHref({ billId: bill.billId, title: bill.title }));
     } catch {
       // Swallow — the failure is already logged by fetchBillTextFunction,
       // and the claim timestamp we just wrote will prevent hot-looping.

@@ -6,6 +6,7 @@ import {
   delay,
 } from "../lib/govtrack";
 import { createStandalonePrisma } from "../lib/prisma-standalone";
+import { runWithConcurrency } from "../lib/concurrency";
 import dayjs, { type Dayjs } from "dayjs";
 
 const prisma = createStandalonePrisma();
@@ -22,6 +23,10 @@ const OVERLAP_DAYS = 2;
 // covers it and the offset never approaches GovTrack's 1000 cap. 600 is the
 // documented page-size ceiling.
 const ROLL_CALLS_PAGE_SIZE = 600;
+// Cap on parallel GovTrack /bill lookups per day's batch. They used to fire
+// all at once — a busy day references dozens of bills — which is an easy way
+// to get throttled by a free, keyless API this cron depends on.
+const BILL_FETCH_CONCURRENCY = 4;
 
 export interface FetchVotesOptions {
   /**
@@ -248,8 +253,10 @@ async function processVoteBatch(
   ];
   const toFetch = uniqueGovtrackIds.filter((id) => !billCache.has(id));
   if (toFetch.length > 0) {
-    const fetched = await Promise.all(
-      toFetch.map((id) =>
+    const fetched = await runWithConcurrency(
+      toFetch,
+      BILL_FETCH_CONCURRENCY,
+      (id) =>
         fetchGovTrackBill(id).catch((err: any) => {
           console.error(
             `Failed to fetch bill ${id}:`,
@@ -257,7 +264,6 @@ async function processVoteBatch(
           );
           return null;
         }),
-      ),
     );
     fetched.forEach((data, i) => {
       if (isUsableBill(data)) billCache.set(toFetch[i], data);

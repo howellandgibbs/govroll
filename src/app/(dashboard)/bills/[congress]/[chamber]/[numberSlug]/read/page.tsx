@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { pickBillHeadline } from "@/lib/bill-headline";
 import { buildReaderSections } from "@/lib/bills/reader-sections";
 import { maybeFetchBillTextInBackground } from "@/lib/on-demand-bill-text";
+import { getCurrentCongress } from "@/lib/momentum";
 import {
   billReadHref,
   billIdentifierFor,
@@ -34,34 +35,22 @@ import type {
 // `loading.tsx` is present, Next.js wraps this page in a Suspense boundary
 // that swallows the redirect thrown by `permanentRedirect` during the
 // non-canonical URL check below — the request ends up returning 200 with
-// the page body instead of a 308. Cold SSR without a loading skeleton is
-// fast enough here that the UX cost is marginal; keeping the redirects
-// working on the reader route matters more for SEO.
+// the page body instead of a 308 (and `notFound()` would lose its 404).
+// Cold SSR without a loading skeleton is fast enough here that the UX cost
+// is marginal; keeping the redirects working on the reader route matters
+// more for SEO.
 //
-// ISR with a 1-hour revalidate window: bill text rarely changes within
-// an hour (new versions arrive infrequently and via the hourly backfill
-// cron). Caching the rendered page avoids shipping multi-MB fullText
-// rows through the Postgres pooler on every visitor — the dominant
-// source of pre-fix egress. Redirects still work under ISR: a
-// non-canonical URL renders, hits permanentRedirect, and the 308
-// response is what gets cached for that URL.
-export const revalidate = 3600;
-
-// Opt this dynamic-param route into on-demand ISR. A dynamic route only
-// honors `revalidate` when it also exports `generateStaticParams` — without
-// it the route is plain per-request SSR and the heavy fullText query above
-// would run on every hit. Returning `[]` prerenders nothing at build (the
-// bill set is huge and Vercel's build can't reach Postgres), while
-// `dynamicParams` (default true) still generates each path on first request
-// and caches it for `revalidate` seconds — the egress win this route exists
-// for.
-export function generateStaticParams(): {
-  congress: string;
-  chamber: string;
-  numberSlug: string;
-}[] {
-  return [];
-}
+// Rendered per request — deliberately NOT ISR. This route used to be
+// on-demand ISR (1h revalidate), which on Vercel writes every freshly
+// rendered page to durable storage — the full bill text twice (HTML + RSC
+// payload) — and each deploy starts a fresh ISR cache. Crawlers sweeping
+// ~43k reader pages therefore re-spent the Hobby plan's whole monthly ISR
+// write budget after every deploy (100% alerts in Aug and Sep 2026). With
+// ~90% of reader hits being MISS/STALE renders anyway (crawler traffic
+// rarely repeats a page), rendering per request costs little extra CPU and
+// takes ISR writes off the table. Supabase Pro's egress allowance absorbs
+// the fullText reads that the ISR cache used to spare.
+export const dynamic = "force-dynamic";
 
 type RouteParams = Promise<{
   congress: string;
@@ -165,10 +154,9 @@ export default async function BillReaderPage({
   // path that still uses Bill.fullText fetches it lazily below.
   //
   // We always render the *latest* version. Older versions load
-  // client-side in <BillReader> via `?v=`, so this page reads no
-  // searchParams and the whole route stays full-route ISR-cacheable
-  // (the `revalidate = 3600` above). The `id` desc tiebreak keeps
-  // "latest" deterministic when two versions share a versionDate.
+  // client-side in <BillReader> via `?v=` (a holdover from when this route
+  // was ISR-cached and couldn't read searchParams). The `id` desc tiebreak
+  // keeps "latest" deterministic when two versions share a versionDate.
   const renderVersionQuery = prisma.billTextVersion.findFirst({
     where: { bill: { billId: billIdKey }, fullText: { not: null } },
     orderBy: [{ versionDate: "desc" }, { id: "desc" }],
@@ -255,6 +243,12 @@ export default async function BillReaderPage({
   }
 
   if (!renderableText) {
+    // A bill from an ended Congress with no text by now won't get any
+    // (pre-2003 bills have no machine-readable text at all). 404 so crawlers
+    // drop the URL instead of re-requesting an empty page; notFound() also
+    // injects `noindex`. The detail page never links here without text.
+    if (parsed.congress < getCurrentCongress()) notFound();
+
     // Only this rare no-text path needs the version count, so compute it
     // here with a cheap targeted COUNT. Previously this rode along as a
     // `_count` aggregate on the main bill query above, which scanned the
@@ -265,7 +259,6 @@ export default async function BillReaderPage({
     maybeFetchBillTextInBackground({
       id: bill.id,
       billId: bill.billId,
-      title: bill.title,
       hasFullText: textVersionsWithText > 0,
       textFetchAttemptedAt: bill.textFetchAttemptedAt,
     });
