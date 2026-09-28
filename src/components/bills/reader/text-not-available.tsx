@@ -21,6 +21,9 @@ export function TextNotAvailable({
 }) {
   return (
     <div className="bg-paper min-h-screen">
+      {/* An empty reader shouldn't be indexed. React hoists this into
+          <head>; bills that will never get text 404 before reaching here. */}
+      <meta name="robots" content="noindex" />
       <div className="mx-auto max-w-2xl px-6 py-24 text-center">
         <h1 className="text-ink text-2xl font-semibold sm:text-3xl">
           {bill.headline ?? bill.title}

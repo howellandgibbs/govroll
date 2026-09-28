@@ -1,7 +1,24 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+/**
+ * @supabase/ssr keeps the session in `sb-<project-ref>-auth-token` cookies
+ * (chunked as `.0`, `.1`, … when large). No such cookie means there's no
+ * session to refresh.
+ */
+export function hasSupabaseAuthCookie(request: NextRequest): boolean {
+  return request.cookies
+    .getAll()
+    .some(({ name }) => name.startsWith("sb-") && name.includes("-auth-token"));
+}
+
 export async function updateSession(request: NextRequest) {
+  // Anonymous visitors (and every crawler) have nothing to refresh — skip
+  // building a client for them.
+  if (!hasSupabaseAuthCookie(request)) {
+    return NextResponse.next({ request });
+  }
+
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(

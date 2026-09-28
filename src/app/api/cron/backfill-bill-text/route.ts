@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@/generated/prisma/client";
 import { timingSafeEqualStr } from "@/lib/timing-safe-equal";
 import { prisma } from "@/lib/prisma";
 import { fetchBillTextFunction } from "@/scripts/fetch-bill-text";
 import { isQuotaError } from "@/lib/congress-api";
 import { reportError } from "@/lib/error-reporting";
+import { runWithConcurrency } from "@/lib/concurrency";
+import { getCurrentCongress } from "@/lib/momentum";
+import { ENDED_CONGRESS_TEXT_RETRY_DAYS } from "@/lib/on-demand-bill-text";
 
 /**
  * GET /api/cron/backfill-bill-text
@@ -23,33 +27,18 @@ import { reportError } from "@/lib/error-reporting";
  * Fetches run with bounded concurrency (3-way) inside a 55s budget so
  * we can ingest ~18 bills per invocation instead of 6, which keeps up
  * with the ~60-120 bills/day of new legislation.
+ *
+ * Bills from an ended Congress ride a slow lane: after their first attempt
+ * they only come back around every ENDED_CONGRESS_TEXT_RETRY_DAYS. Their
+ * text is either already fetched or never coming (pre-2003 bills have no
+ * machine-readable text), and ~12.5k of them rotating through the hourly
+ * queue was most of this cron's work for nothing.
  */
 
 // Hobby plan cap is 60s. We budget 55s and bail early if approaching.
 export const maxDuration = 60;
 const TIMEOUT_MS = 55_000;
 const CONCURRENCY = 3;
-
-async function runWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    async () => {
-      while (true) {
-        const idx = cursor++;
-        if (idx >= items.length) return;
-        results[idx] = await fn(items[idx]);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
-}
 
 export async function GET(request: Request) {
   const expected = process.env.CRON_SECRET;
@@ -81,16 +70,29 @@ export async function GET(request: Request) {
   const started = Date.now();
   const deadline = started + TIMEOUT_MS;
 
+  const endedCongressRetryCutoff = new Date(
+    started - ENDED_CONGRESS_TEXT_RETRY_DAYS * 86_400_000,
+  );
+  const eligible = {
+    ...(tiers ? { momentumTier: { in: tiers } } : {}),
+    fullText: null,
+    textVersions: { none: { fullText: { not: null } } },
+    // Current-Congress bills rotate hourly; an ended Congress's bills get
+    // their first attempt, then the slow lane (see the header comment).
+    OR: [
+      { congressNumber: null },
+      { congressNumber: { gte: getCurrentCongress() } },
+      { textFetchAttemptedAt: null },
+      { textFetchAttemptedAt: { lt: endedCongressRetryCutoff } },
+    ],
+  } satisfies Prisma.BillWhereInput;
+
   // Least-recently-attempted first, with never-attempted bills (NULLS)
   // before any attempted ones. This turns the stuck-at-head-of-queue
   // problem into a rotation: bills that can't be fetched drop to the
   // back for ~24h while fresh bills get tried first.
   const batch = await prisma.bill.findMany({
-    where: {
-      ...(tiers ? { momentumTier: { in: tiers } } : {}),
-      fullText: null,
-      textVersions: { none: { fullText: { not: null } } },
-    },
+    where: eligible,
     orderBy: [{ textFetchAttemptedAt: { sort: "asc", nulls: "first" } }],
     select: { billId: true },
     take: limit,
@@ -138,13 +140,7 @@ export async function GET(request: Request) {
   const timedOut = results.some((r) => r.error === "timeout");
   const quotaExhausted = results.some((r) => r.quota);
 
-  const remaining = await prisma.bill.count({
-    where: {
-      ...(tiers ? { momentumTier: { in: tiers } } : {}),
-      fullText: null,
-      textVersions: { none: { fullText: { not: null } } },
-    },
-  });
+  const remaining = await prisma.bill.count({ where: eligible });
 
   const elapsedMs = Date.now() - started;
 

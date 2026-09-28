@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { timingSafeEqualStr } from "@/lib/timing-safe-equal";
 import { fetchVotesFunction } from "@/scripts/fetch-votes";
 import { reportError } from "@/lib/error-reporting";
+import { isTransientCongressError } from "@/lib/congress-api";
 
 /**
  * Dedicated votes-only cron.
@@ -27,6 +28,12 @@ import { reportError } from "@/lib/error-reporting";
  * honored so no roll call in the gap is lost. Pass `?since=YYYY-MM-DD` to
  * force a deep backfill from an explicit date — it advances the cursor
  * per-day, so a backfill bigger than one run's budget resumes on the next.
+ *
+ * Transient GovTrack failures (timeouts, dropped connections, 429/5xx) are
+ * non-paging, same as the Congress.gov crons: the run stops with the cursor
+ * where it was and the next hourly run re-walks the day. These used to email
+ * an alert once or twice a day. A sustained outage still pages — the
+ * ingest-health watchdog alerts when the fetch-votes cursor stops advancing.
  */
 
 export const maxDuration = 60;
@@ -78,6 +85,17 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: true, ms });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
+    if (isTransientCongressError(error)) {
+      // The classifier is generic over axios errors, so it covers GovTrack.
+      console.warn(
+        `[fetch-votes cron] stopped on a transient GovTrack error (${msg}); cursor preserved, resuming next run`,
+      );
+      return NextResponse.json({
+        ok: true,
+        ms: Date.now() - start,
+        upstreamPaused: true,
+      });
+    }
     console.error(`[fetch-votes cron] failed:`, msg);
     await reportError(error instanceof Error ? error : new Error(msg), {
       context: "fetch-votes cron",

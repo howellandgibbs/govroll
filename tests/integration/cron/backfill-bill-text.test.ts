@@ -78,6 +78,65 @@ describe("GET /api/cron/backfill-bill-text", () => {
     expect(after?.textFetchAttemptedAt).toBeNull();
   });
 
+  it("puts an ended Congress's already-tried bills in the slow lane", async () => {
+    const DAY = 86_400_000;
+    const db = getTestPrisma();
+    // 104th Congress (1995–96): no machine-readable text will ever appear, so
+    // one attempt per ENDED_CONGRESS_TEXT_RETRY_DAYS (180) is plenty.
+    const triedYesterday = await seedBill({
+      billId: "house_bill-701-104",
+      congressNumber: 104,
+      textFetchAttemptedAt: new Date(Date.now() - DAY),
+    });
+    const triedLongAgo = await seedBill({
+      billId: "house_bill-702-104",
+      congressNumber: 104,
+      textFetchAttemptedAt: new Date(Date.now() - 200 * DAY),
+    });
+    const neverTried = await seedBill({
+      billId: "house_bill-703-104",
+      congressNumber: 104,
+    });
+    // Current-Congress bills keep rotating hourly regardless of last attempt.
+    const current = await seedBill({
+      billId: "house_bill-704-119",
+      textFetchAttemptedAt: new Date(Date.now() - DAY),
+    });
+
+    const res = await invokeCron(GET);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    // Default MSW handlers 404 every upstream → each processed bill is a
+    // graceful no-op that stamps textFetchAttemptedAt.
+    expect(body.processed).toBe(3);
+    // Afterwards only the current-Congress bill is still due.
+    expect(body.remaining).toBe(1);
+
+    const after = new Map(
+      (
+        await db.bill.findMany({
+          where: {
+            id: {
+              in: [
+                triedYesterday.id,
+                triedLongAgo.id,
+                neverTried.id,
+                current.id,
+              ],
+            },
+          },
+          select: { id: true, textFetchAttemptedAt: true },
+        })
+      ).map((b) => [b.id, b.textFetchAttemptedAt!.getTime()]),
+    );
+    const recent = Date.now() - 60_000;
+    expect(after.get(triedYesterday.id)).toBeLessThan(recent); // untouched
+    expect(after.get(triedLongAgo.id)).toBeGreaterThan(recent);
+    expect(after.get(neverTried.id)).toBeGreaterThan(recent);
+    expect(after.get(current.id)).toBeGreaterThan(recent);
+  });
+
   it("runs a concurrent batch on one shared client without disconnecting it", async () => {
     // Seed more eligible bills than CONCURRENCY (3) so the route's workers
     // genuinely overlap on the single pooled client they now share. Each is

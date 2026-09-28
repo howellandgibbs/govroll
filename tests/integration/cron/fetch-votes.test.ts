@@ -414,12 +414,13 @@ describe("GET /api/cron/fetch-votes", () => {
     expect(votes).toHaveLength(1);
   });
 
-  it("returns 500 when GovTrack is down (systemic failure is not laundered into ok)", async () => {
-    // The core regression: a GovTrack/DB outage used to be swallowed and the
-    // cron returned {ok:true}/200, so GH Actions went green over a broken run.
-    // It must now surface as a 500 so the route fires reportError and the
-    // Action fails red. /vote returns a roll call so the walk reaches the
-    // voter fetch — the call that fails here.
+  it("stops quietly on a transient GovTrack outage, leaving the cursor for the watchdog", async () => {
+    // GovTrack timeouts / 5xx used to 500 and email an alert once or twice a
+    // day. They're now non-paging like the Congress.gov crons: 200 with
+    // upstreamPaused, and — the part that keeps an outage visible — the cursor
+    // does NOT advance, so ingest-health pages if it stays stuck for 8h.
+    // /vote returns a roll call so the walk reaches the voter fetch, which
+    // fails here.
     server.use(
       http.get("https://www.govtrack.us/api/v2/vote", () =>
         HttpResponse.json({
@@ -437,6 +438,28 @@ describe("GET /api/cron/fetch-votes", () => {
       http.get(
         "https://www.govtrack.us/api/v2/vote_voter",
         () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+
+    const res = await invokeCron(GET);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.upstreamPaused).toBe(true);
+
+    const cursor = await getTestPrisma().ingestCursor.findUnique({
+      where: { key: "fetch-votes" },
+    });
+    expect(cursor).toBeNull();
+  });
+
+  it("still returns 500 on a non-transient failure (systemic failure is not laundered into ok)", async () => {
+    // A 4xx is a bug on our side (bad params, changed API), not backpressure,
+    // so it must fail the run and alert.
+    server.use(
+      http.get(
+        "https://www.govtrack.us/api/v2/vote",
+        () => new HttpResponse(null, { status: 400 }),
       ),
     );
 

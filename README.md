@@ -143,17 +143,19 @@ which calls idempotent, CRON_SECRET-gated endpoints on govroll.com.
 
 | Endpoint                            | Cadence              | Purpose                                        |
 | ----------------------------------- | -------------------- | ---------------------------------------------- |
-| `/api/cron/compute-congress-status` | every 10 min         | In-session / recess / break detector           |
-| `/api/cron/fetch-votes`             | every 30 min         | Recorded roll-call votes (cursor + 2d overlap) |
+| `/api/cron/compute-congress-status` | every 30 min         | In-session / recess / break detector           |
+| `/api/cron/fetch-votes`             | hourly               | Recorded roll-call votes (cursor + 2d overlap) |
 | `/api/cron/compute-momentum`        | hourly               | Recomputes alive/dormant/dead signal           |
 | `/api/cron/backfill-bill-text`      | hourly               | Fills missing bill text (small batch)          |
-| `/api/cron/backfill-bill-actions`   | every 2h             | Status / action history for active bills       |
+| `/api/cron/backfill-bill-actions`   | hourly               | Status / action history for active bills       |
 | `/api/cron/backfill-cosponsors`     | every 2h             | Individual cosponsor rows                      |
 | `/api/cron/fetch-bills`             | every 3h             | New bills since our latest                     |
-| `/api/cron/refresh-bill-metadata`   | every 6h             | Sponsor / policyArea / CRS summary refresh     |
-| `/api/cron/evaluate-budget`         | daily 00:00 UTC      | Recomputes AI budget gate                      |
+| `/api/cron/refresh-bill-metadata`   | hourly               | Sponsor / policyArea / CRS summary refresh     |
+| `/api/cron/evaluate-budget`         | hourly               | Recomputes AI budget gate                      |
+| `/api/cron/ingest-health`           | hourly               | Stall watchdog (pages on sustained stalls)     |
 | `/api/cron/cleanup-expired-cache`   | daily 03:30 UTC      | Sweeps expired AiResponseCache rows            |
 | `/api/cron/fetch-representatives`   | weekly Mon 10:00 UTC | Member roster refresh                          |
+| `/api/cron/embed-large-bills`       | paused (manual)      | Chat RAG embeddings for large bills            |
 
 The AI precompute crons (`generate-change-summaries`, `generate-bill-explainers`,
 `generate-section-captions`) exist as endpoints but are not on any schedule —

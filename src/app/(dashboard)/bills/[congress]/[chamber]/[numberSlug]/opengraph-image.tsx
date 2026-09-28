@@ -13,6 +13,30 @@ export const contentType = "image/png";
 const FONT_URL =
   "https://cdn.jsdelivr.net/fontsource/fonts/archivo@latest/latin-800-normal.woff";
 
+// Let Vercel's CDN keep the rendered card. ImageResponse otherwise sends
+// `max-age=0, must-revalidate`, so every link unfurl (Slack, X, iMessage) and
+// crawler fetch re-ran the DB query, the font download and the PNG render
+// (~2.5s per request) against the free tier's Active CPU budget. A share card
+// whose status line is up to a week stale is fine.
+const CACHE_CONTROL =
+  "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400";
+
+// One font download per warm instance instead of one per render. A failed
+// fetch clears the slot so the next render retries.
+let archivoFont: Promise<ArrayBuffer> | null = null;
+function loadArchivoFont(): Promise<ArrayBuffer> {
+  archivoFont ??= fetch(FONT_URL)
+    .then((r) => {
+      if (!r.ok) throw new Error(`font fetch failed: HTTP ${r.status}`);
+      return r.arrayBuffer();
+    })
+    .catch((err: unknown) => {
+      archivoFont = null;
+      throw err;
+    });
+  return archivoFont;
+}
+
 // Roll Call palette — the card uses sand/ink/sapphire only, plus the one
 // gold node on the route motif.
 const SAND = "#F2EDE3";
@@ -88,7 +112,9 @@ type Params = Promise<{
 }>;
 
 export default async function OgImage({ params }: { params: Params }) {
-  const fontPromise = fetch(FONT_URL).then((r) => r.arrayBuffer());
+  // Kicked off before the DB lookup so the two overlap. A CDN hiccup falls
+  // back to the default font rather than failing the whole image.
+  const fontPromise = loadArchivoFont().catch(() => null);
 
   const { congress, chamber, numberSlug } = await params;
   const parsed = parseBillPath([congress, chamber, numberSlug]);
@@ -114,17 +140,20 @@ export default async function OgImage({ params }: { params: Params }) {
     : null;
 
   const fontData = await fontPromise;
-  const fonts = [
-    {
-      name: "Archivo",
-      data: fontData,
-      weight: 800 as const,
-      style: "normal" as const,
-    },
-  ];
+  const fonts = fontData
+    ? [
+        {
+          name: "Archivo",
+          data: fontData,
+          weight: 800 as const,
+          style: "normal" as const,
+        },
+      ]
+    : undefined;
+  const headers = { "Cache-Control": CACHE_CONTROL };
 
   if (!bill) {
-    return new ImageResponse(<BrandFallback />, { ...size, fonts });
+    return new ImageResponse(<BrandFallback />, { ...size, fonts, headers });
   }
 
   const { headline: rawHeadline } = pickBillHeadline(bill);
@@ -217,7 +246,7 @@ export default async function OgImage({ params }: { params: Params }) {
         </div>
       </div>
     </div>,
-    { ...size, fonts },
+    { ...size, fonts, headers },
   );
 }
 

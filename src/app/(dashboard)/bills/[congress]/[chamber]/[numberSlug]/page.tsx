@@ -260,7 +260,6 @@ export default async function BillDetailPage({
   maybeFetchBillTextInBackground({
     id: bill.id,
     billId: bill.billId,
-    title: bill.title,
     hasFullText: bill._count.textVersions > 0,
     textFetchAttemptedAt: bill.textFetchAttemptedAt,
   });
