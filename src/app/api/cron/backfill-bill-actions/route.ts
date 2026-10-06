@@ -323,6 +323,7 @@ export async function GET(request: Request) {
         currentStatusDate?: Date;
         latestActionText?: string;
         latestActionDate?: Date;
+        momentumComputedAt?: null;
       } = { ...refreshStamp };
 
       if (correctedStatus && correctedStatus !== b.currentStatus) {
@@ -332,6 +333,11 @@ export async function GET(request: Request) {
         if (latest) {
           billUpdate.currentStatusDate = new Date(latest.actionDate);
         }
+        // Tier and score derive from the status. Clearing the watermark
+        // puts the bill first in the next hourly compute-momentum run
+        // instead of leaving, say, a just-enacted law tiered DEAD until
+        // its momentum goes stale on its own (up to ~3 days).
+        billUpdate.momentumComputedAt = null;
         statusesReconciled++;
       }
 

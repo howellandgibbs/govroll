@@ -431,6 +431,10 @@ describe("GET /api/cron/backfill-bill-actions", () => {
       latestActionText: "Became Public Law No: 119-1.",
       latestActionDate: new Date("2025-01-29"),
     });
+    await prisma.bill.update({
+      where: { id: law.id },
+      data: { momentumComputedAt: new Date("2026-01-01") },
+    });
 
     server.use(
       http.get("https://api.congress.gov/v3/bill/119/s/5/actions", () =>
@@ -461,6 +465,8 @@ describe("GET /api/cron/backfill-bill-actions", () => {
     const after = await prisma.bill.findUnique({ where: { id: law.id } });
     expect(after?.currentStatus).toBe("enacted_signed");
     expect(after?.lastActionRefreshAt).not.toBeNull();
+    // Queued for compute-momentum so the DEAD tier doesn't linger.
+    expect(after?.momentumComputedAt).toBeNull();
   });
 
   it("evidence pass fetches a bill once, not again until a newer action arrives", async () => {
