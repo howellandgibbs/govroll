@@ -57,6 +57,19 @@ describe("reconcileStatus — enacted", () => {
     );
   });
 
+  it("private law → enacted_signed", () => {
+    const actions = [
+      action("Became Private Law No: 111-1.", {
+        type: "President",
+        date: "2010-05-01",
+      }),
+      INTRODUCED,
+    ];
+    expect(reconcileStatus("introduced", "house_bill", actions)).toBe(
+      "enacted_signed",
+    );
+  });
+
   it("already enacted_signed → null (authoritative, never walked back)", () => {
     const actions = [
       action("Became Public Law No: 119-91.", { type: "President" }),

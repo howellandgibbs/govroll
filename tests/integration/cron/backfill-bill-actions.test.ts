@@ -416,6 +416,87 @@ describe("GET /api/cron/backfill-bill-actions", () => {
     expect(body.processed).toBe(1);
   });
 
+  it("evidence pass reconciles a signed law that was tiered DEAD at 'introduced'", async () => {
+    // The Laken Riley Act shape: imported after it was signed, computed
+    // DEAD on arrival, never action-refreshed — so neither the routine
+    // pool (live tiers) nor the vote-priority pass ever reached it.
+    // refresh-bill-metadata had kept latestActionText current, though.
+    const prisma = getTestPrisma();
+    const law = await seedBill({
+      billId: "senate_bill-5-119",
+      billType: "senate_bill",
+      currentStatus: "introduced",
+      currentStatusDate: new Date("2025-01-06"),
+      momentumTier: "DEAD",
+      latestActionText: "Became Public Law No: 119-1.",
+      latestActionDate: new Date("2025-01-29"),
+    });
+
+    server.use(
+      http.get("https://api.congress.gov/v3/bill/119/s/5/actions", () =>
+        HttpResponse.json({
+          actions: [
+            {
+              actionDate: "2025-01-29",
+              text: "Became Public Law No: 119-1.",
+              type: "BecameLaw",
+              sourceSystem: { name: "Library of Congress" },
+            },
+            {
+              actionDate: "2025-01-29",
+              text: "Signed by President.",
+              type: "President",
+              sourceSystem: { name: "Library of Congress" },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const res = await invokeCron(GET);
+    const body = await res.json();
+    expect(body.evidenceProcessed).toBe(1);
+    expect(body.statusesReconciled).toBe(1);
+
+    const after = await prisma.bill.findUnique({ where: { id: law.id } });
+    expect(after?.currentStatus).toBe("enacted_signed");
+    expect(after?.lastActionRefreshAt).not.toBeNull();
+  });
+
+  it("evidence pass fetches a bill once, not again until a newer action arrives", async () => {
+    // Refreshed after its latest action: the action log has already had
+    // its chance to explain the text, so don't spend a call every run.
+    await seedBill({
+      billId: "house_bill-22-119",
+      billType: "house_bill",
+      currentStatus: "introduced",
+      momentumTier: "DEAD",
+      latestActionText: "Received in the Senate.",
+      latestActionDate: new Date("2025-04-10"),
+      lastActionRefreshAt: new Date("2025-05-01"),
+    });
+    const res = await invokeCron(GET);
+    const body = await res.json();
+    expect(body.evidenceProcessed).toBe(0);
+    expect(body.processed).toBe(0);
+  });
+
+  it("passage evidence only counts against bills still introduced or reported", async () => {
+    // Already pass_over_house: "Received in the Senate" is consistent.
+    await seedBill({
+      billId: "house_bill-23-119",
+      billType: "house_bill",
+      currentStatus: "pass_over_house",
+      momentumTier: "DEAD",
+      latestActionText: "Received in the Senate.",
+      latestActionDate: new Date("2025-04-10"),
+    });
+    const res = await invokeCron(GET);
+    const body = await res.json();
+    expect(body.evidenceProcessed).toBe(0);
+    expect(body.processed).toBe(0);
+  });
+
   it("fails loudly (503) on congress.gov quota exhaustion and leaves the bill re-selectable", async () => {
     // A 429 used to be laundered into null actions, the bill got stamped
     // lastActionRefreshAt, and it dropped into a 6h cooldown over a transient
