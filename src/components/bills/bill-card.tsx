@@ -7,6 +7,7 @@ import { getTopicForPolicyArea } from "@/lib/topic-mapping";
 import { billHref } from "@/lib/bills/url";
 import { formatBillNumber } from "@/lib/bill-grouping";
 import { pickBillHeadline } from "@/lib/bill-headline";
+import { deathLabel, statusLabel } from "@/lib/bill-status-labels";
 
 // Reddit's visited-link cue, translated to Roll Call: a muted title + a
 // vote chip that tells you *how* you voted at a glance. Maya/flame are
@@ -45,29 +46,6 @@ function CardNavIndicator() {
       <div className="border-ink/20 border-t-ink/70 absolute top-3 right-4 h-3.5 w-3.5 animate-spin rounded-full border-2" />
     </div>
   );
-}
-
-function statusLabel(status: string): string {
-  if (status.startsWith("enacted_")) return "Enacted";
-  if (
-    status === "passed_bill" ||
-    status.startsWith("conference_") ||
-    status === "passed_simpleres" ||
-    status === "passed_concurrentres"
-  )
-    return "Passed";
-  if (status.startsWith("pass_over_") || status.startsWith("pass_back_"))
-    return "In Progress";
-  if (status.startsWith("prov_kill_") && status !== "prov_kill_veto")
-    return "Stalled";
-  if (
-    status.startsWith("fail_") ||
-    status.startsWith("vetoed_") ||
-    status === "prov_kill_veto"
-  )
-    return "Failed";
-  if (status === "reported") return "In Committee";
-  return "Introduced";
 }
 
 /**
@@ -110,21 +88,6 @@ function formatSilence(days: number): string {
   if (days < 14) return `${days}d`;
   if (days < 60) return `${Math.round(days / 7)}w`;
   return `${Math.round(days / 30)}mo`;
-}
-
-function deathLabel(reason: DeathReason | null): string {
-  switch (reason) {
-    case "CONGRESS_ENDED":
-      return "Congress ended";
-    case "FAILED_VOTE":
-      return "Failed vote";
-    case "VETOED":
-      return "Vetoed";
-    case "LONG_SILENCE":
-      return "No action >1yr";
-    default:
-      return "Died";
-  }
 }
 
 interface TierTreatment {

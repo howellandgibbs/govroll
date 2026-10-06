@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBillsPage } from "@/lib/queries/bills";
+import { fetchBillsPage, lookupBillCitation } from "@/lib/queries/bills";
+import {
+  DEFAULT_BILLS_FILTERS,
+  toBillsQueryInput,
+} from "@/lib/queries/bills-client";
 import {
   searchRepresentatives,
   type RepSearchResult,
 } from "@/lib/queries/representatives";
+import { classifySearch } from "@/lib/bill-search";
 import { reportError } from "@/lib/error-reporting";
 import type { BillSummary, ParsedCitationSummary } from "@/types";
 
@@ -25,16 +30,21 @@ const BILL_LIMIT = 5;
  * for the typeahead dropdown. Deliberately combines the two queries into a
  * single round trip so the dropdown isn't waiting on two requests serially.
  *
- * Bill search reuses the canonical fetchBillsPage path with momentum="all"
- * — header search shouldn't hide a famous dead bill someone heard about on
- * the news. Filters (chamber, status, topic) are not exposed; they belong
- * on /bills, not in the global typeahead.
+ * The bill rows are the first five results of /bills?search=<q>: the same
+ * fetchBillsPage call with the page's default filters. "See all bill
+ * matches" therefore opens a page that starts with exactly the rows the
+ * dropdown showed, and a bill found here can't vanish there.
+ *
+ * A typed citation ("HR 1234") returns only its bill. The /bills page
+ * lists the regular feed under its jump-to row, but in a five-row
+ * dropdown those trending bills read as matches for "HR 1234".
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const query = (searchParams.get("q") ?? "").trim();
+  const search = classifySearch(query);
 
-  if (query.length < 2) {
+  if (search.kind === "none") {
     return NextResponse.json<GlobalSearchResponse>({
       query,
       representatives: [],
@@ -45,26 +55,29 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [representatives, billsResult] = await Promise.all([
+    const [representatives, billResults] = await Promise.all([
       searchRepresentatives(query, REP_LIMIT),
-      fetchBillsPage({
-        page: 1,
-        limit: BILL_LIMIT,
-        chamber: "both",
-        status: "",
-        momentum: "all",
-        sortBy: "relevant",
-        search: query,
-        topic: "",
-      }),
+      search.kind === "citation"
+        ? lookupBillCitation(search.citation).then((r) => ({
+            bills: [],
+            citation: r.citation,
+            exactMatch: r.exactMatch,
+          }))
+        : fetchBillsPage(
+            toBillsQueryInput(
+              { ...DEFAULT_BILLS_FILTERS, search: query },
+              1,
+              BILL_LIMIT,
+            ),
+          ),
     ]);
 
     return NextResponse.json<GlobalSearchResponse>({
       query,
       representatives,
-      bills: billsResult.bills,
-      citation: billsResult.citation,
-      exactBill: billsResult.exactMatch,
+      bills: billResults.bills,
+      citation: billResults.citation,
+      exactBill: billResults.exactMatch,
     });
   } catch (error) {
     console.error(

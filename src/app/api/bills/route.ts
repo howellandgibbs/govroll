@@ -5,6 +5,7 @@ import {
   type BillsMomentum,
   type BillsSortBy,
 } from "@/lib/queries/bills";
+import { DEFAULT_BILLS_FILTERS } from "@/lib/queries/bills-client";
 import { reportError } from "@/lib/error-reporting";
 import { clampLimit, clampPage } from "@/lib/pagination";
 
@@ -30,11 +31,25 @@ export async function GET(request: NextRequest) {
     const data = await fetchBillsPage({
       page,
       limit,
-      chamber: coerce(searchParams.get("chamber"), VALID_CHAMBERS, "both"),
-      status: searchParams.get("status") ?? "",
-      momentum: coerce(searchParams.get("momentum"), VALID_MOMENTUM, "live"),
-      sortBy: coerce(searchParams.get("sortBy"), VALID_SORTS, "relevant"),
-      search: searchParams.get("search") ?? "",
+      chamber: coerce(
+        searchParams.get("chamber"),
+        VALID_CHAMBERS,
+        DEFAULT_BILLS_FILTERS.chamber,
+      ),
+      status: searchParams.get("status") ?? DEFAULT_BILLS_FILTERS.status,
+      momentum: coerce(
+        searchParams.get("momentum"),
+        VALID_MOMENTUM,
+        DEFAULT_BILLS_FILTERS.momentum,
+      ),
+      sortBy: coerce(
+        searchParams.get("sortBy"),
+        VALID_SORTS,
+        DEFAULT_BILLS_FILTERS.sortBy,
+      ),
+      search: searchParams.get("search") ?? DEFAULT_BILLS_FILTERS.search,
+      // Already CRS policy areas: the client resolves the topic label in
+      // buildBillsSearchParams.
       topic: searchParams.get("topic") ?? "",
     });
     return NextResponse.json(data);

@@ -14,6 +14,13 @@ export type DeathReason =
   | "VETOED"
   | "LONG_SILENCE";
 
+/**
+ * Where a bill sits in best-match keyword results: bills titled exactly
+ * what was typed, then live bills (the tiers the default feed shows),
+ * then everything stalled, dormant or dead.
+ */
+export type BillSearchGroup = "name" | "live" | "inactive";
+
 export interface BillSummary {
   id: number;
   billId: string;
@@ -39,6 +46,8 @@ export interface BillSummary {
   displayTitle: string | null;
   publicVoteCount?: number;
   commentCount?: number;
+  /** Set only on best-match keyword search results. */
+  searchGroup?: BillSearchGroup;
 }
 
 export interface BillDetail extends BillSummary {
