@@ -301,7 +301,7 @@ export function BillListClient() {
         </svg>
         <input
           aria-label="Search bills"
-          placeholder="Search bills by name, number or topic"
+          placeholder="Search by name, number or topic"
           value={queryFilters.search}
           onChange={(e) => setFilters({ search: e.target.value })}
           onFocus={() => setSearchFocused(true)}
