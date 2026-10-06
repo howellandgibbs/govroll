@@ -88,7 +88,9 @@ model Bill {
   lastActionRefreshAt   DateTime?
   // Title variants fetched from Congress.gov /titles endpoint. We search
   // on all of these via the weighted searchVector generated column —
-  // users type popular names ("CHIPS Act"), not official titles.
+  // users type popular names ("CHIPS Act"), not official titles. Each
+  // title column also has a GIN trigram index for fuzzy matching; those
+  // live in migrations because @@index can't express gin_trgm_ops.
   popularTitle          String?
   shortTitle            String?
   displayTitle          String?

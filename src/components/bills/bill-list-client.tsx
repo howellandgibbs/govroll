@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryStates, parseAsString, parseAsStringLiteral } from "nuqs";
 import {
   keepPreviousData,
@@ -12,43 +12,47 @@ import { BillGroupCard } from "./bill-group-card";
 import { TOPICS } from "@/lib/topic-mapping";
 import { useAuth } from "@/hooks/use-auth";
 import { useUserPref } from "@/hooks/use-user-pref";
-import { groupBills } from "@/lib/bill-grouping";
+import { groupBills, type BillFeedItem } from "@/lib/bill-grouping";
 import { formatOrdinal } from "@/lib/parse-bill-citation";
+import { classifySearch } from "@/lib/bill-search";
 import {
+  DEFAULT_BILLS_FILTERS,
   billsQueryKey,
   fetchBillsPageClient,
   type BillsFilterState,
 } from "@/lib/queries/bills-client";
 import type { BillsQueryResult } from "@/lib/queries/bills";
-import type { VoteType } from "@/types";
+import type { BillSearchGroup, BillSummary, VoteType } from "@/types";
 
+// "relevant" means momentum while browsing and best match while
+// searching, so its tab is relabeled when a keyword search is active.
 const SORT_OPTIONS = [
-  { value: "relevant", label: "Trending" },
-  { value: "latest", label: "Latest Activity" },
-  { value: "newest", label: "Newest" },
+  { value: "relevant", label: "Trending", searchLabel: "Best match" },
+  { value: "latest", label: "Latest Activity", searchLabel: null },
+  { value: "newest", label: "Newest", searchLabel: null },
 ] as const;
 
 const SEARCH_EXAMPLES = ["H.R. 1", "S. 1", "defense"] as const;
 
 const filterParsers = {
-  search: parseAsString.withDefault(""),
+  search: parseAsString.withDefault(DEFAULT_BILLS_FILTERS.search),
   chamber: parseAsStringLiteral([
     "both",
     "house",
     "senate",
-  ] as const).withDefault("both"),
-  status: parseAsString.withDefault(""),
+  ] as const).withDefault(DEFAULT_BILLS_FILTERS.chamber),
+  status: parseAsString.withDefault(DEFAULT_BILLS_FILTERS.status),
   momentum: parseAsStringLiteral([
     "live",
     "graveyard",
     "all",
-  ] as const).withDefault("live"),
+  ] as const).withDefault(DEFAULT_BILLS_FILTERS.momentum),
   sortBy: parseAsStringLiteral([
     "relevant",
     "latest",
     "newest",
-  ] as const).withDefault("relevant"),
-  topic: parseAsString.withDefault(""),
+  ] as const).withDefault(DEFAULT_BILLS_FILTERS.sortBy),
+  topic: parseAsString.withDefault(DEFAULT_BILLS_FILTERS.topic),
 };
 
 const filterOptions = {
@@ -69,6 +73,58 @@ const CHIP_BASE =
   "shrink-0 border px-2.5 py-1 text-xs font-semibold whitespace-nowrap transition-colors";
 const CHIP_IDLE = "border-rule text-ink hover:border-ink/40 bg-paper";
 const CHIP_ACTIVE = "border-ink bg-ink text-sand";
+
+const EMPTY_ACTION =
+  "text-ink border-rule hover:border-ink/40 bg-paper inline-flex items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors";
+
+const SECTION_LABEL =
+  "text-ink-muted mb-1.5 px-0.5 text-[11px] font-bold tracking-[0.18em] uppercase tabular-nums";
+
+// Labels for best-match search groups. Default returns null so a bundle
+// cached from before a new group existed renders it unlabeled instead
+// of crashing.
+function searchGroupLabel(group: BillSearchGroup | null): string | null {
+  switch (group) {
+    case "name":
+      return "Bills with this name";
+    case "live":
+      return "Active or enacted";
+    case "inactive":
+      return "Stalled, dormant or dead";
+    default:
+      return null;
+  }
+}
+
+interface FeedSection {
+  group: BillSearchGroup | null;
+  items: BillFeedItem[];
+}
+
+// Split the feed into runs of the same search group, grouping duplicate
+// bills within each run so a cluster never straddles a section label.
+// Outside best-match search every bill has no group: one section.
+function sectionFeed(bills: BillSummary[]): FeedSection[] {
+  const sections: FeedSection[] = [];
+  let run: BillSummary[] = [];
+  let runGroup: BillSearchGroup | null = null;
+  const flush = () => {
+    if (run.length > 0) {
+      sections.push({ group: runGroup, items: groupBills(run) });
+    }
+  };
+  for (const bill of bills) {
+    const group = bill.searchGroup ?? null;
+    if (run.length > 0 && group !== runGroup) {
+      flush();
+      run = [];
+    }
+    runGroup = group;
+    run.push(bill);
+  }
+  flush();
+  return sections;
+}
 
 export function BillListClient() {
   const [rawFilters, setFilters] = useQueryStates(filterParsers, filterOptions);
@@ -126,8 +182,17 @@ export function BillListClient() {
   );
   const total = data?.pages[0]?.total ?? 0;
   const hiddenByMomentum = data?.pages[0]?.hiddenByMomentum ?? 0;
+  const groupCounts = data?.pages[0]?.groupCounts ?? null;
   const exactMatch = data?.pages[0]?.exactMatch ?? null;
   const citation = data?.pages[0]?.citation ?? null;
+  // A keyword search covers every bill, so the live-only toggle doesn't
+  // apply and "relevant" means best match. Citations still show the feed.
+  const searchText = queryFilters.search.trim();
+  const isKeywordSearch = classifySearch(searchText).kind === "keyword";
+  const hasNarrowingFilters =
+    queryFilters.topic !== "" ||
+    queryFilters.chamber !== "both" ||
+    queryFilters.status !== "";
   const error = queryError
     ? "Something went wrong loading bills. Please try again."
     : null;
@@ -168,7 +233,13 @@ export function BillListClient() {
     [bills, hideVoted, userVotes],
   );
   const hiddenByVoteCount = hideVoted ? bills.length - visibleBills.length : 0;
-  const feedItems = useMemo(() => groupBills(visibleBills), [visibleBills]);
+  const sections = useMemo(() => sectionFeed(visibleBills), [visibleBills]);
+  // Label groups only when the matches span more than one of them.
+  const showGroupLabels =
+    groupCounts !== null &&
+    [groupCounts.name, groupCounts.live, groupCounts.inactive].filter(
+      (n) => n > 0,
+    ).length > 1;
 
   // Infinite-scroll sentinel: fire fetchNextPage when it scrolls into view.
   useEffect(() => {
@@ -229,7 +300,8 @@ export function BillListClient() {
           <path d="m21 21-4.35-4.35" strokeWidth="2" strokeLinecap="round" />
         </svg>
         <input
-          placeholder="Search bills or sponsors..."
+          aria-label="Search bills"
+          placeholder="Search bills by name, number or topic"
           value={queryFilters.search}
           onChange={(e) => setFilters({ search: e.target.value })}
           onFocus={() => setSearchFocused(true)}
@@ -274,7 +346,7 @@ export function BillListClient() {
                   : "text-ink-muted hover:text-ink border-transparent"
               }`}
             >
-              {opt.label}
+              {isKeywordSearch && opt.searchLabel ? opt.searchLabel : opt.label}
             </button>
           );
         })}
@@ -382,7 +454,7 @@ export function BillListClient() {
 
       {/* Count + hidden bills link */}
       <div className="flex min-h-[24px] items-center justify-between">
-        <p className="text-ink-muted flex items-center gap-2 text-[13px] tabular-nums">
+        <p className="text-ink-muted flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] tabular-nums">
           {isRefiltering && (
             <span className="inline-flex items-center gap-1.5">
               <span className="border-ink/15 border-t-ink/70 h-3 w-3 animate-spin rounded-full border-2" />
@@ -394,15 +466,17 @@ export function BillListClient() {
               <span>
                 {`${total.toLocaleString("en-US")} bill${total !== 1 ? "s" : ""}`}
               </span>
-              {queryFilters.momentum === "live" && hiddenByMomentum > 0 && (
-                <button
-                  onClick={() => setFilters({ momentum: "all" })}
-                  className="hover:text-ink underline decoration-dotted underline-offset-2 transition-colors"
-                >
-                  {`(${hiddenByMomentum.toLocaleString("en-US")} dormant or dead hidden)`}
-                </button>
-              )}
-              {queryFilters.momentum === "all" && (
+              {!isKeywordSearch &&
+                queryFilters.momentum === "live" &&
+                hiddenByMomentum > 0 && (
+                  <button
+                    onClick={() => setFilters({ momentum: "all" })}
+                    className="hover:text-ink underline decoration-dotted underline-offset-2 transition-colors"
+                  >
+                    {`(${hiddenByMomentum.toLocaleString("en-US")} stalled, dormant or dead hidden)`}
+                  </button>
+                )}
+              {!isKeywordSearch && queryFilters.momentum === "all" && (
                 <button
                   onClick={() => setFilters({ momentum: "live" })}
                   className="hover:text-ink underline decoration-dotted underline-offset-2 transition-colors"
@@ -429,7 +503,7 @@ export function BillListClient() {
           the main feed so they can still browse other results. */}
       {citation && (
         <div className="animate-fade-slide-up">
-          <div className="text-ink-muted mb-1.5 px-0.5 text-[11px] font-bold tracking-[0.18em] uppercase tabular-nums">
+          <div className={SECTION_LABEL}>
             {exactMatch ? (
               <>
                 Jump to {citation.shortLabel} {citation.number}
@@ -455,33 +529,59 @@ export function BillListClient() {
         </div>
       )}
 
-      {/* Bill list */}
+      {/* Bill list. Best-match search results arrive in groups (bills
+          with the typed name, then active, then stalled/dormant/dead) and
+          get a label per group; everything else is a single section. */}
       <div
         className={`space-y-2 transition-opacity duration-150 ${
           isRefiltering ? "pointer-events-none opacity-40" : ""
         }`}
         aria-busy={isRefiltering}
       >
-        {feedItems.map((item, i) => {
-          const key =
-            item.kind === "single"
-              ? `bill-${item.bill.id}`
-              : `group-${item.key}`;
+        {sections.map((section, sectionIndex) => {
+          const label = showGroupLabels
+            ? searchGroupLabel(section.group)
+            : null;
+          const count =
+            section.group && groupCounts ? groupCounts[section.group] : null;
+          const offset = sections
+            .slice(0, sectionIndex)
+            .reduce((n, s) => n + s.items.length, 0);
           return (
-            <div
-              key={key}
-              className="animate-fade-slide-up"
-              style={{ animationDelay: `${Math.min(i, 10) * 30}ms` }}
-            >
-              {item.kind === "single" ? (
-                <BillCard
-                  bill={item.bill}
-                  userVote={userVotes.get(item.bill.id) ?? null}
-                />
-              ) : (
-                <BillGroupCard bills={item.bills} userVotes={userVotes} />
+            <Fragment key={`section-${sectionIndex}-${section.group ?? "all"}`}>
+              {label && (
+                <div
+                  className={`${SECTION_LABEL} ${sectionIndex > 0 ? "pt-4" : ""}`}
+                >
+                  {label}
+                  {count != null && ` · ${count.toLocaleString("en-US")}`}
+                </div>
               )}
-            </div>
+              {section.items.map((item, i) => {
+                const key =
+                  item.kind === "single"
+                    ? `bill-${item.bill.id}`
+                    : `group-${item.key}`;
+                return (
+                  <div
+                    key={key}
+                    className="animate-fade-slide-up"
+                    style={{
+                      animationDelay: `${Math.min(offset + i, 10) * 30}ms`,
+                    }}
+                  >
+                    {item.kind === "single" ? (
+                      <BillCard
+                        bill={item.bill}
+                        userVote={userVotes.get(item.bill.id) ?? null}
+                      />
+                    ) : (
+                      <BillGroupCard bills={item.bills} userVotes={userVotes} />
+                    )}
+                  </div>
+                );
+              })}
+            </Fragment>
           );
         })}
       </div>
@@ -537,11 +637,48 @@ export function BillListClient() {
         </div>
       )}
 
-      {!isLoading && !error && bills.length === 0 && (
-        <div className="py-16 text-center">
+      {/* Empty states name the way out. A browse filter that hides
+          inactive bills offers them; a search with filters offers to
+          drop the filters. */}
+      {!isLoading && !isFetching && !error && bills.length === 0 && (
+        <div className="space-y-3 py-16 text-center">
           <p className="text-ink-muted text-base">
-            No bills found matching your filters.
+            {isKeywordSearch ? (
+              <>
+                No bills match &ldquo;{searchText}&rdquo;
+                {hasNarrowingFilters ? " with these filters." : "."}
+              </>
+            ) : queryFilters.momentum === "live" && hiddenByMomentum > 0 ? (
+              "No active bills match these filters."
+            ) : (
+              "No bills found matching your filters."
+            )}
           </p>
+          {isKeywordSearch && !hasNarrowingFilters && (
+            <p className="text-ink-muted text-sm">
+              Check the spelling, try fewer words, or search by bill number,
+              like H.R. 1.
+            </p>
+          )}
+          {!isKeywordSearch &&
+          queryFilters.momentum === "live" &&
+          hiddenByMomentum > 0 ? (
+            <button
+              onClick={() => setFilters({ momentum: "all" })}
+              className={EMPTY_ACTION}
+            >
+              {`Show ${hiddenByMomentum.toLocaleString("en-US")} stalled, dormant or dead ${hiddenByMomentum === 1 ? "bill" : "bills"}`}
+            </button>
+          ) : hasNarrowingFilters ? (
+            <button
+              onClick={() =>
+                setFilters({ topic: "", chamber: "both", status: "" })
+              }
+              className={EMPTY_ACTION}
+            >
+              Clear filters
+            </button>
+          ) : null}
         </div>
       )}
 
