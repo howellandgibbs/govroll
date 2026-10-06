@@ -91,6 +91,8 @@ function searchGroupLabel(group: BillSearchGroup | null): string | null {
       return "Active or enacted";
     case "inactive":
       return "Stalled, dormant or dead";
+    case "past":
+      return "Past Congresses";
     default:
       return null;
   }
@@ -237,9 +239,7 @@ export function BillListClient() {
   // Label groups only when the matches span more than one of them.
   const showGroupLabels =
     groupCounts !== null &&
-    [groupCounts.name, groupCounts.live, groupCounts.inactive].filter(
-      (n) => n > 0,
-    ).length > 1;
+    Object.values(groupCounts).filter((n) => n > 0).length > 1;
 
   // Infinite-scroll sentinel: fire fetchNextPage when it scrolls into view.
   useEffect(() => {
@@ -530,8 +530,9 @@ export function BillListClient() {
       )}
 
       {/* Bill list. Best-match search results arrive in groups (bills
-          with the typed name, then active, then stalled/dormant/dead) and
-          get a label per group; everything else is a single section. */}
+          with the typed name; this Congress's active, then stalled/
+          dormant/dead; past Congresses) and get a label per group;
+          everything else is a single section. */}
       <div
         className={`space-y-2 transition-opacity duration-150 ${
           isRefiltering ? "pointer-events-none opacity-40" : ""

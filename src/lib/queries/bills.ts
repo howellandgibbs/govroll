@@ -4,6 +4,7 @@ import { Prisma } from "@/generated/prisma/client";
 import { statusMapping } from "@/lib/status-mapping";
 import { type BillCitation } from "@/lib/parse-bill-citation";
 import { classifySearch } from "@/lib/bill-search";
+import { getCurrentCongress } from "@/lib/momentum";
 import type {
   BillSearchGroup,
   BillSummary,
@@ -202,7 +203,12 @@ function bareNameSql(value: Prisma.Sql): Prisma.Sql {
     ' act ?$', ''))`;
 }
 
-const SEARCH_GROUPS: readonly BillSearchGroup[] = ["name", "live", "inactive"];
+const SEARCH_GROUPS: readonly BillSearchGroup[] = [
+  "name",
+  "live",
+  "inactive",
+  "past",
+];
 
 /**
  * Keyword search. Weighted full-text search on the tsvector (popular +
@@ -216,13 +222,20 @@ const SEARCH_GROUPS: readonly BillSearchGroup[] = ["name", "live", "inactive"];
  * as ranking instead:
  *
  *   0. name     — titled exactly what was typed (see bareNameSql), in any
- *                 tier. Only when the query reads like a name
- *                 (hasNameIntent); a topic word like "housing" never pins.
- *   1. live     — the tiers the default feed shows.
- *   2. inactive — stalled, dormant, dead: what the default feed hides.
+ *                 tier or Congress, newest first. Only when the query
+ *                 reads like a name (hasNameIntent); a topic word like
+ *                 "housing" never pins.
+ *   1. live     — this Congress, in the tiers the default feed shows.
+ *   2. inactive — this Congress, stalled/dormant/dead.
+ *   3. past     — earlier Congresses, newest first, laws before bills
+ *                 that died. Ranking every law ever enacted with today's
+ *                 live bills let a 1998 highway law that mentions insulin
+ *                 outrank the Affordable Insulin Now Act.
  *
- * Inside each group: newest Congress first, then relevance. Relevance is
- * ts_rank_cd normalized by document length (flag 1) so a bill about
+ * Within a group, a bill whose title contains the query outranks one that
+ * only stems to it ("housing" also matches "House": a resolution about
+ * House photographs shouldn't top housing results). Then relevance:
+ * ts_rank_cd normalized by document length (flag 1), so a bill about
  * housing outranks an omnibus whose long summary mentions housing forty
  * times.
  *
@@ -281,21 +294,38 @@ async function searchBillsPage(
       ))`
     : Prisma.sql`FALSE`;
   const liveSql = Prisma.sql`b."momentumTier" IN (${Prisma.join(LIVE_TIERS)})`;
+  const currentSql = Prisma.sql`b."congressNumber" >= ${getCurrentCongress()}`;
   const groupSql = Prisma.sql`CASE
     WHEN ${nameMatchSql} THEN 0
-    WHEN ${liveSql} THEN 1
-    ELSE 2
+    WHEN ${currentSql} AND ${liveSql} THEN 1
+    WHEN ${currentSql} THEN 2
+    ELSE 3
   END`;
+  // The query (bare) appears verbatim in one of the titles. position()
+  // rather than LIKE so % and _ in the query are plain characters.
+  const titleHasQuerySql = Prisma.sql`position(${bareQuery} in lower(
+    COALESCE(b."popularTitle", '') || ' ' || COALESCE(b."shortTitle", '')
+    || ' ' || COALESCE(b."displayTitle", '') || ' ' || b."title"
+  )) > 0`;
 
   // b.id last on every order: OFFSET pagination needs a total order, or
   // tied rows can repeat or vanish between infinite-scroll pages.
   let orderSql: Prisma.Sql;
   if (bestMatch) {
-    // The live key only reorders the name group (live is all-live,
-    // inactive is all-not): a same-named live bill leads dead ones.
+    // Congress only varies within the name and past groups (live and
+    // inactive are this Congress by definition). The live key reorders
+    // the name group (a same-named live bill leads dead ones) and puts a
+    // past Congress's laws before its dead bills. Laws also lead adopted
+    // resolutions there — but only in past Congresses: in this one it
+    // would float every omnibus that mentions the topic above the bills
+    // about it. (grp is an output alias, which ORDER BY can't use inside
+    // an expression, hence the repeated Congress test.)
     orderSql = Prisma.sql`grp ASC,
       b."congressNumber" DESC NULLS LAST,
       (${liveSql}) DESC NULLS LAST,
+      (${titleHasQuerySql}) DESC,
+      CASE WHEN ${currentSql} THEN NULL
+        ELSE b."currentStatus" LIKE 'enacted%' END DESC NULLS LAST,
       ${rankSql} DESC,
       b."momentumScore" DESC NULLS LAST,
       b."introducedDate" DESC NULLS LAST,
@@ -339,12 +369,13 @@ async function searchBillsPage(
     name: 0,
     live: 0,
     inactive: 0,
+    past: 0,
   };
   for (const row of countRows) {
     const group = SEARCH_GROUPS[row.grp];
     if (group) groupCounts[group] = Number(row.count);
   }
-  const total = groupCounts.name + groupCounts.live + groupCounts.inactive;
+  const total = Object.values(groupCounts).reduce((n, c) => n + c, 0);
 
   const ids = rows.map((r) => r.id);
   const billRows = ids.length

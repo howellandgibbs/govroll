@@ -16,10 +16,11 @@ export type DeathReason =
 
 /**
  * Where a bill sits in best-match keyword results: bills titled exactly
- * what was typed, then live bills (the tiers the default feed shows),
- * then everything stalled, dormant or dead.
+ * what was typed; this Congress's live bills (the tiers the default feed
+ * shows); this Congress's stalled, dormant or dead bills; then earlier
+ * Congresses.
  */
-export type BillSearchGroup = "name" | "live" | "inactive";
+export type BillSearchGroup = "name" | "live" | "inactive" | "past";
 
 export interface BillSummary {
   id: number;

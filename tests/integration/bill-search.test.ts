@@ -13,9 +13,12 @@ import {
 } from "@/app/api/search/route";
 import { GET as billsGET } from "@/app/api/bills/route";
 import type { BillsQueryResult } from "@/lib/queries/bills";
+import { getCurrentCongress } from "@/lib/momentum";
 import { getTestPrisma } from "./db";
 
 let seq = 0;
+// Relative to today so "this Congress" vs "past Congresses" holds in 2027+.
+const CURRENT = getCurrentCongress();
 
 /**
  * Bill with a human title and a neutral official title, so full-text and
@@ -24,6 +27,8 @@ let seq = 0;
 async function seedNamedBill(o: {
   name: string;
   tier: string;
+  status?: string;
+  officialTitle?: string;
   congress?: number;
   billType?: string;
   number?: number;
@@ -34,20 +39,22 @@ async function seedNamedBill(o: {
   momentumScore?: number;
 }) {
   seq += 1;
-  const congress = o.congress ?? 119;
+  const congress = o.congress ?? CURRENT;
   const billType = o.billType ?? "house_bill";
   const number = o.number ?? 1000 + seq;
   const introduced = new Date(o.introducedDate ?? "2025-06-01");
   return getTestPrisma().bill.create({
     data: {
       billId: `${billType}-${number}-${congress}`,
-      title: `To amend title ${seq} of the code, and for other purposes.`,
+      title:
+        o.officialTitle ??
+        `To amend title ${seq} of the code, and for other purposes.`,
       displayTitle: o.name,
       shortText: o.summary ?? null,
       date: introduced,
       billType,
       currentChamber: "house",
-      currentStatus: "introduced",
+      currentStatus: o.status ?? "introduced",
       currentStatusDate: introduced,
       introducedDate: introduced,
       latestActionDate: new Date(o.latestActionDate ?? "2025-06-02"),
@@ -94,7 +101,11 @@ describe("bill keyword search", () => {
   it("finds a dormant bill by name and puts it first, over the live-only default", async () => {
     await seedNamedBill({ name: "GHOST Act", tier: "ACTIVE" });
     await seedNamedBill({ name: "FIRST Act", tier: "ADVANCING" });
-    await seedNamedBill({ name: "NEST Act", tier: "DEAD", congress: 118 });
+    await seedNamedBill({
+      name: "NEST Act",
+      tier: "DEAD",
+      congress: CURRENT - 1,
+    });
     await seedNamedBill({ name: "NEST Act", tier: "DORMANT" });
 
     // The client always sends momentum=live; search must ignore it.
@@ -109,7 +120,12 @@ describe("bill keyword search", () => {
       "DEAD",
     ]);
     expect(result.bills.map((b) => b.searchGroup)).toEqual(["name", "name"]);
-    expect(result.groupCounts).toEqual({ name: 2, live: 0, inactive: 0 });
+    expect(result.groupCounts).toEqual({
+      name: 2,
+      live: 0,
+      inactive: 0,
+      past: 0,
+    });
     expect(result.total).toBe(2);
     expect(result.hiddenByMomentum).toBe(0);
   });
@@ -122,8 +138,12 @@ describe("bill keyword search", () => {
     expect(result.total).toBe(0);
   });
 
-  it("orders topic searches live first, then inactive, newest Congress first, without pinning same-named acronym bills", async () => {
-    await seedNamedBill({ name: "HOUSING Act", tier: "DEAD", congress: 118 });
+  it("orders topic searches by this Congress's live bills, then its inactive ones, then past Congresses, without pinning same-named acronym bills", async () => {
+    await seedNamedBill({
+      name: "HOUSING Act",
+      tier: "DEAD",
+      congress: CURRENT - 1,
+    });
     await seedNamedBill({
       name: "Rural Housing Preservation Act",
       tier: "DORMANT",
@@ -131,7 +151,7 @@ describe("bill keyword search", () => {
     await seedNamedBill({
       name: "Housing Voucher Act",
       tier: "ENACTED",
-      congress: 117,
+      congress: CURRENT - 2,
     });
     await seedNamedBill({
       name: "Affordable Housing Supply Act",
@@ -142,23 +162,68 @@ describe("bill keyword search", () => {
 
     expect(names(result)).toEqual([
       "Affordable Housing Supply Act",
-      "Housing Voucher Act",
       "Rural Housing Preservation Act",
       "HOUSING Act",
+      "Housing Voucher Act",
     ]);
     expect(result.bills.map((b) => b.searchGroup)).toEqual([
       "live",
-      "live",
       "inactive",
-      "inactive",
+      "past",
+      "past",
     ]);
-    expect(result.groupCounts).toEqual({ name: 0, live: 2, inactive: 2 });
+    expect(result.groupCounts).toEqual({
+      name: 0,
+      live: 1,
+      inactive: 1,
+      past: 2,
+    });
+  });
+
+  it("lists a past Congress's laws before its bills that died", async () => {
+    await seedNamedBill({
+      name: "Housing Grants Act",
+      tier: "DEAD",
+      congress: CURRENT - 1,
+    });
+    await seedNamedBill({
+      name: "Housing Finance Reform Act",
+      tier: "ENACTED",
+      status: "enacted_signed",
+      congress: CURRENT - 1,
+    });
+
+    const result = await bills("housing");
+    expect(names(result)).toEqual([
+      "Housing Finance Reform Act",
+      "Housing Grants Act",
+    ]);
+  });
+
+  it("puts titles containing the query above matches that only share its stem", async () => {
+    // "housing" and "House" both stem to "hous". Three title hits would
+    // outrank the housing bill's one on relevance alone.
+    await seedNamedBill({
+      name: "House Rules: permitting House photographs on the House floor",
+      tier: "ENACTED",
+      status: "passed_simpleres",
+    });
+    await seedNamedBill({ name: "Housing Choice Voucher Act", tier: "ACTIVE" });
+
+    const result = await bills("housing");
+    expect(names(result)).toEqual([
+      "Housing Choice Voucher Act",
+      "House Rules: permitting House photographs on the House floor",
+    ]);
   });
 
   it("ranks a bill about the topic above one that only mentions it", async () => {
     await seedNamedBill({
       name: "Further Continuing Appropriations Act",
       tier: "ACTIVE",
+      // Title mentions housing too, so only relevance separates the two.
+      officialTitle:
+        "Making further continuing appropriations, including for housing programs.",
       // A long omnibus summary that mentions housing in passing: more raw
       // hits than the housing bill's one title hit, far lower density.
       summary: Array.from({ length: 150 }, (_, i) =>
@@ -259,7 +324,7 @@ describe("header search parity", () => {
       await seedNamedBill({
         name: `Highway Safety Improvement Act ${i}`,
         tier: tiers[i % tiers.length],
-        congress: 119 - (i % 3),
+        congress: CURRENT - (i % 3),
       });
     }
 
@@ -286,7 +351,7 @@ describe("header search parity", () => {
 
     const header = await headerSearch("HR 6096");
     expect(header.bills).toEqual([]);
-    expect(header.exactBill?.billId).toBe("house_bill-6096-119");
+    expect(header.exactBill?.billId).toBe(`house_bill-6096-${CURRENT}`);
     expect(header.citation).toMatchObject({ shortLabel: "H.R.", number: 6096 });
   });
 });
