@@ -55,6 +55,14 @@ const TERMINAL_EVIDENCE =
 // Passage: only contradicts a bill still stored as introduced/reported.
 const PASSAGE_EVIDENCE =
   "passed/agreed to in (house|senate)|^passed (the )?(house|senate)|received in the (house|senate)|resolution agreed to in (house|senate)|considered,? and agreed to|message on (house|senate) action sent";
+// The other chamber acting on a bill also means its own chamber passed
+// it: a House bill reaches the Senate calendar or a Senate committee
+// ("Read twice and referred to the Committee on Finance.") only after
+// House passage, and a Senate bill reaches a House committee only after
+// Senate passage. "Read twice" is the Senate's own introduction wording
+// for its bills, so it counts only against House bills.
+const SENATE_ACTING = "\\msenate\\M|^read twice";
+const HOUSE_ACTING = "\\mhouse\\M";
 
 export async function GET(request: Request) {
   const expected = process.env.CRON_SECRET;
@@ -155,7 +163,17 @@ export async function GET(request: Request) {
             b."latestActionText" ~* ${TERMINAL_EVIDENCE}
             OR (
               b."currentStatus" IN ('introduced', 'reported')
-              AND b."latestActionText" ~* ${PASSAGE_EVIDENCE}
+              AND (
+                b."latestActionText" ~* ${PASSAGE_EVIDENCE}
+                OR (
+                  b."billType" LIKE 'house%'
+                  AND b."latestActionText" ~* ${SENATE_ACTING}
+                )
+                OR (
+                  b."billType" LIKE 'senate%'
+                  AND b."latestActionText" ~* ${HOUSE_ACTING}
+                )
+              )
             )
           )
           ${voteIds.length ? Prisma.sql`AND b.id NOT IN (${Prisma.join(voteIds)})` : Prisma.empty}

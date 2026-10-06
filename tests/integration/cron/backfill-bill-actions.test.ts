@@ -497,6 +497,98 @@ describe("GET /api/cron/backfill-bill-actions", () => {
     expect(body.processed).toBe(0);
   });
 
+  it("evidence pass treats the other chamber acting as passage of the bill's own chamber", async () => {
+    // H.R. 29 (the House's Laken Riley Act) shape: passed the House, then
+    // the Senate's referral became its latest action. "Read twice" has
+    // no chamber word, but only the Senate reads a House bill twice.
+    const prisma = getTestPrisma();
+    const houseBill = await seedBill({
+      billId: "house_bill-29-118",
+      billType: "house_bill",
+      congressNumber: 118,
+      currentStatus: "introduced",
+      momentumTier: "DEAD",
+      latestActionText: "Read twice and referred to the Committee on Finance.",
+      latestActionDate: new Date("2024-03-01"),
+    });
+    const senateBill = await seedBill({
+      billId: "senate_bill-31-118",
+      billType: "senate_bill",
+      congressNumber: 118,
+      currentStatus: "introduced",
+      momentumTier: "DEAD",
+      latestActionText:
+        "Referred to the House Committee on Energy and Commerce.",
+      latestActionDate: new Date("2024-03-05"),
+    });
+
+    server.use(
+      http.get("https://api.congress.gov/v3/bill/118/hr/29/actions", () =>
+        HttpResponse.json({
+          actions: [
+            {
+              actionDate: "2024-03-01",
+              text: "Read twice and referred to the Committee on Finance.",
+              type: "IntroReferral",
+              sourceSystem: { name: "Senate" },
+            },
+            {
+              actionDate: "2024-02-27",
+              text: "Passed/agreed to in House: On passage Passed by the Yeas and Nays: 251 - 170.",
+              type: "Floor",
+              sourceSystem: { name: "Library of Congress" },
+            },
+          ],
+        }),
+      ),
+      http.get("https://api.congress.gov/v3/bill/118/s/31/actions", () =>
+        HttpResponse.json({
+          actions: [
+            {
+              actionDate: "2024-03-05",
+              text: "Referred to the House Committee on Energy and Commerce.",
+              type: "IntroReferral",
+              sourceSystem: { name: "House floor actions" },
+            },
+            {
+              actionDate: "2024-03-01",
+              text: "Passed/agreed to in Senate: Passed Senate without amendment by Unanimous Consent.",
+              type: "Floor",
+              sourceSystem: { name: "Library of Congress" },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const res = await invokeCron(GET);
+    const body = await res.json();
+    expect(body.evidenceProcessed).toBe(2);
+    expect(body.statusesReconciled).toBe(2);
+
+    const [h, sb] = await Promise.all([
+      prisma.bill.findUnique({ where: { id: houseBill.id } }),
+      prisma.bill.findUnique({ where: { id: senateBill.id } }),
+    ]);
+    expect(h?.currentStatus).toBe("pass_over_house");
+    expect(sb?.currentStatus).toBe("pass_over_senate");
+  });
+
+  it("evidence pass ignores a Senate bill's own 'read twice' introduction", async () => {
+    await seedBill({
+      billId: "senate_bill-32-118",
+      billType: "senate_bill",
+      congressNumber: 118,
+      currentStatus: "introduced",
+      momentumTier: "DEAD",
+      latestActionText: "Read twice and referred to the Committee on Finance.",
+      latestActionDate: new Date("2024-03-01"),
+    });
+    const res = await invokeCron(GET);
+    const body = await res.json();
+    expect(body.evidenceProcessed).toBe(0);
+  });
+
   it("fails loudly (503) on congress.gov quota exhaustion and leaves the bill re-selectable", async () => {
     // A 429 used to be laundered into null actions, the bill got stamped
     // lastActionRefreshAt, and it dropped into a 6h cooldown over a transient
