@@ -85,6 +85,47 @@ describe("computeMomentum", () => {
     expect(old.score).toBeGreaterThanOrEqual(25);
   });
 
+  it("prior-Congress law keeps the ENACTED label but decays to 0, below every live bill", () => {
+    const oldLaw = computeMomentum(
+      {
+        ...baseInputs,
+        congressNumber: 111,
+        currentStatus: "enacted_signed",
+        latestActionDate: new Date("2010-03-30T00:00:00Z"),
+      },
+      119,
+      now,
+    );
+    expect(oldLaw.tier).toBe("ENACTED");
+    expect(oldLaw.deathReason).toBeNull();
+    expect(oldLaw.score).toBe(0);
+
+    // The current Congress's year-old laws keep their floor of 25.
+    const thisCongress = computeMomentum(
+      {
+        ...baseInputs,
+        currentStatus: "enacted_signed",
+        latestActionDate: new Date("2025-01-29T00:00:00Z"),
+      },
+      119,
+      now,
+    );
+    expect(thisCongress.score).toBe(25);
+
+    const oldResolution = computeMomentum(
+      {
+        ...baseInputs,
+        congressNumber: 118,
+        currentStatus: "passed_simpleres",
+        latestActionDate: new Date("2024-06-01T00:00:00Z"),
+      },
+      119,
+      now,
+    );
+    expect(oldResolution.tier).toBe("ENACTED");
+    expect(oldResolution.score).toBe(0);
+  });
+
   it("bill that passed one chamber → ADVANCING", () => {
     const result = computeMomentum(
       {

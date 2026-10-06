@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { timingSafeEqualStr } from "@/lib/timing-safe-equal";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma/client";
 import { fetchBillActions, isQuotaError } from "@/lib/congress-api";
 import { parseBillId } from "@/lib/parse-bill-id";
 import { reconcileStatus } from "@/lib/reconcile-bill-status";
@@ -42,6 +43,18 @@ const TIMEOUT_MS = 55_000;
 // the pool. 6h is short enough that a chamber vote shows up the same
 // day, long enough that the ~5k live bills don't hammer congress.gov.
 const REFRESH_COOLDOWN_HOURS = 6;
+// Latest-action evidence (see the evidence pass below) gets at most this
+// many slots per run, so a large backlog drains steadily without starving
+// the routine refresh of live bills.
+const EVIDENCE_LIMIT = 10;
+// congress.gov latest-action text that only a later status can explain.
+// Terminal: any status short of enacted is behind (veto rows included —
+// reconcileStatus decides what the action log supports).
+const TERMINAL_EVIDENCE =
+  "became (public|private) law|signed by (the )?president|presented to (the )?president|vetoed by (the )?president|pocket vetoed";
+// Passage: only contradicts a bill still stored as introduced/reported.
+const PASSAGE_EVIDENCE =
+  "passed/agreed to in (house|senate)|^passed (the )?(house|senate)|received in the (house|senate)|resolution agreed to in (house|senate)|considered,? and agreed to|message on (house|senate) action sent";
 
 export async function GET(request: Request) {
   const expected = process.env.CRON_SECRET;
@@ -113,8 +126,46 @@ export async function GET(request: Request) {
     LIMIT ${priorityLimit};
   `;
 
-  const priorityIds = priorityRows.map((r) => r.id);
-  const remainingSlots = Math.max(0, limit - priorityRows.length);
+  // Evidence pass: congress.gov's own latest action — kept fresh on every
+  // bill by refresh-bill-metadata — names a milestone the stored status
+  // hasn't reached. Bills imported after they'd already gone quiet were
+  // computed DORMANT/DEAD on arrival and so never entered the routine
+  // pool below: ~1,100 signed laws (the Laken Riley Act and the GENIUS
+  // Act among them, ~930 from before 2013) sat at "introduced", tiered
+  // DEAD. Any tier qualifies. Only bills whose actions haven't been
+  // fetched since that latest action do, so a bill whose action log
+  // can't explain the text is fetched once, not every run.
+  const voteIds = priorityRows.map((r) => r.id);
+  const evidenceLimit = Math.min(
+    EVIDENCE_LIMIT,
+    Math.max(0, limit - priorityRows.length),
+  );
+  const evidenceRows = evidenceLimit
+    ? await prisma.$queryRaw<BatchRow[]>`
+        SELECT b.id, b."billId", b."billType", b."currentStatus",
+               b."currentStatusDate", b."latestActionText", b."latestActionDate"
+        FROM "Bill" b
+        WHERE b."currentStatus" NOT LIKE 'enacted%'
+          AND b."latestActionDate" IS NOT NULL
+          AND (
+            b."lastActionRefreshAt" IS NULL
+            OR b."lastActionRefreshAt" < b."latestActionDate"
+          )
+          AND (
+            b."latestActionText" ~* ${TERMINAL_EVIDENCE}
+            OR (
+              b."currentStatus" IN ('introduced', 'reported')
+              AND b."latestActionText" ~* ${PASSAGE_EVIDENCE}
+            )
+          )
+          ${voteIds.length ? Prisma.sql`AND b.id NOT IN (${Prisma.join(voteIds)})` : Prisma.empty}
+        ORDER BY b."congressNumber" DESC NULLS LAST, b."latestActionDate" DESC
+        LIMIT ${evidenceLimit};
+      `
+    : [];
+
+  const priorityIds = [...voteIds, ...evidenceRows.map((r) => r.id)];
+  const remainingSlots = Math.max(0, limit - priorityIds.length);
 
   // Routine pass: bills due for refresh, ordered by NULLS-FIRST and
   // newest-status first. Excludes anything already in the priority
@@ -147,7 +198,7 @@ export async function GET(request: Request) {
       })
     : [];
 
-  const batch: BatchRow[] = [...priorityRows, ...routineRows];
+  const batch: BatchRow[] = [...priorityRows, ...evidenceRows, ...routineRows];
 
   let processed = 0;
   let statusesReconciled = 0;
@@ -362,6 +413,7 @@ export async function GET(request: Request) {
     ok: true,
     processed,
     priorityProcessed: priorityRows.length,
+    evidenceProcessed: evidenceRows.length,
     statusesReconciled,
     latestActionUpdated,
     errorCount: errors.length,

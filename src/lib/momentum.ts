@@ -245,12 +245,18 @@ export function computeMomentum(
 
   // --- Hard overrides ---
 
+  const priorCongress =
+    inputs.congressNumber !== null && inputs.congressNumber < currentCongress;
+
   // Enacted: the only terminal success. Score decays from 100 over ~45 day
   // half-life to a floor of 25 so fresh enactments top the feed but don't
   // squat there forever — a year-old enactment sits around 25, just above
   // dormant bills. Tier stays "ENACTED" regardless; it's a factual label.
+  // A prior Congress's laws decay all the way to 0: they're history, and
+  // at 25 the ~1,000 pre-2013 laws would outrank hundreds of current
+  // active bills in Trending.
   if (inputs.currentStatus.startsWith("enacted_")) {
-    const floor = 25;
+    const floor = priorCongress ? 0 : 25;
     const halfLife = 45;
     const score = Math.round(
       floor + (100 - floor) * Math.pow(0.5, daysSinceLastAction / halfLife),
@@ -271,7 +277,7 @@ export function computeMomentum(
     inputs.currentStatus === "passed_simpleres" ||
     inputs.currentStatus === "passed_concurrentres"
   ) {
-    const floor = 10;
+    const floor = priorCongress ? 0 : 10;
     const peak = 50;
     const halfLife = 45;
     const score = Math.round(
@@ -281,10 +287,7 @@ export function computeMomentum(
   }
 
   // Prior Congress: constitutionally dead, bills do not carry over.
-  if (
-    inputs.congressNumber !== null &&
-    inputs.congressNumber < currentCongress
-  ) {
+  if (priorCongress) {
     return {
       score: 0,
       tier: "DEAD",

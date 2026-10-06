@@ -52,7 +52,7 @@ export function reconcileStatus(
   const passedOther = sorted.find((a) => passageChamber(a) === otherChamber);
   const failedOrigin = sorted.find((a) => failureChamber(a) === originChamber);
   const becameLaw = sorted.find((a) =>
-    /became public law|signed by president/i.test(a.text),
+    /became (?:public|private) law|signed by president/i.test(a.text),
   );
   const vetoed = sorted.find(
     (a) =>
