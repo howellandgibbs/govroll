@@ -16,6 +16,9 @@ import { partyLetter } from "@/lib/representative-utils";
 import { getTopicForPolicyArea } from "@/lib/topic-mapping";
 import { pickBillHeadline } from "@/lib/bill-headline";
 import { billHref } from "@/lib/bills/url";
+import { formatBillNumber } from "@/lib/bill-grouping";
+import { billStatusLine } from "@/lib/bill-status-labels";
+import { MIN_SEARCH_LENGTH } from "@/lib/bill-search";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { RepPhoto } from "@/components/representatives/rep-photo";
 import type { GlobalSearchResponse } from "@/app/api/search/route";
@@ -23,7 +26,7 @@ import type { BillSummary } from "@/types";
 import type { RepSearchResult } from "@/lib/queries/representatives";
 
 const DEBOUNCE_MS = 200;
-const MIN_QUERY = 2;
+const MIN_QUERY = MIN_SEARCH_LENGTH;
 
 // Flattened, navigable result list. The dropdown renders sections, but
 // keyboard arrows traverse the whole list — building a single ordered
@@ -516,7 +519,7 @@ interface BillRowProps {
 
 function BillRow({ id, bill, active, onMouseEnter, onSelect }: BillRowProps) {
   const headline = pickBillHeadline(bill);
-  const citation = formatBillCitation(bill.billId);
+  const citation = formatBillNumber(bill.billType, bill.billId);
   const topic = getTopicForPolicyArea(bill.policyArea);
 
   return (
@@ -553,11 +556,11 @@ function BillRow({ id, bill, active, onMouseEnter, onSelect }: BillRowProps) {
           {headline.headline}
         </span>
       </div>
-      {bill.currentStatus && (
-        <div className="text-ink-muted truncate pl-1 text-xs">
-          {bill.currentStatus.replace(/_/g, " ")}
-        </div>
-      )}
+      {/* Stage plus momentum, in the card's words: a dormant or dead
+          bill says so before anyone clicks through. */}
+      <div className="text-ink-muted truncate pl-1 text-xs">
+        {billStatusLine(bill)}
+      </div>
     </Link>
   );
 }
@@ -597,35 +600,6 @@ function SeeAllRow({
       <span className="text-ink-muted text-xs">&rarr;</span>
     </Link>
   );
-}
-
-/**
- * GovTrack-style billId ("senate_bill-3706-118") → "S. 3706" for the
- * dropdown row. The full citation parser lives in parse-bill-citation.ts
- * but it's tuned for input parsing; this is the inverse and only needs
- * to handle the eight bill types we ingest.
- */
-function formatBillCitation(billId: string): string | null {
-  const lastDash = billId.lastIndexOf("-");
-  if (lastDash === -1) return null;
-  const rest = billId.slice(0, lastDash);
-  const secondLastDash = rest.lastIndexOf("-");
-  if (secondLastDash === -1) return null;
-  const number = rest.slice(secondLastDash + 1);
-  const billType = rest.slice(0, secondLastDash);
-  const labels: Record<string, string> = {
-    house_bill: "H.R.",
-    senate_bill: "S.",
-    house_joint_resolution: "H.J. Res.",
-    senate_joint_resolution: "S.J. Res.",
-    house_concurrent_resolution: "H. Con. Res.",
-    senate_concurrent_resolution: "S. Con. Res.",
-    house_resolution: "H. Res.",
-    senate_resolution: "S. Res.",
-  };
-  const label = labels[billType];
-  if (!label) return null;
-  return `${label} ${number}`;
 }
 
 /**

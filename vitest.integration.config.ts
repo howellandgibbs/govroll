@@ -22,6 +22,13 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Query modules guard themselves with `import "server-only"`, a
+      // package Next.js resolves internally. Point it at Next's own
+      // server-side no-op so those modules load under vitest.
+      "server-only": path.resolve(
+        __dirname,
+        "./node_modules/next/dist/compiled/server-only/empty.js",
+      ),
     },
   },
 });

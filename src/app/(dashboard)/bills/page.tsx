@@ -6,8 +6,9 @@ import { SystemBanner } from "@/components/system-banner";
 import { getServerQueryClient } from "@/lib/query-client";
 import { fetchBillsPage } from "@/lib/queries/bills";
 import {
-  BILLS_PAGE_SIZE,
+  DEFAULT_BILLS_FILTERS,
   billsQueryKey,
+  toBillsQueryInput,
   type BillsFilterState,
 } from "@/lib/queries/bills-client";
 import type { BillsQueryResult } from "@/lib/queries/bills";
@@ -38,17 +39,18 @@ function pickOneOf<T extends string>(
 }
 
 function filtersFromSearchParams(sp: SearchParams): BillsFilterState {
+  const d = DEFAULT_BILLS_FILTERS;
   return {
     search: pickString(sp, "search"),
-    chamber: pickOneOf(sp, "chamber", ["both", "house", "senate"], "both"),
+    chamber: pickOneOf(sp, "chamber", ["both", "house", "senate"], d.chamber),
     status: pickString(sp, "status"),
-    momentum: pickOneOf(sp, "momentum", ["live", "graveyard", "all"], "live"),
-    sortBy: pickOneOf(
+    momentum: pickOneOf(
       sp,
-      "sortBy",
-      ["relevant", "latest", "newest"],
-      "relevant",
+      "momentum",
+      ["live", "graveyard", "all"],
+      d.momentum,
     ),
+    sortBy: pickOneOf(sp, "sortBy", ["relevant", "latest", "newest"], d.sortBy),
     topic: pickString(sp, "topic"),
   };
 }
@@ -73,8 +75,7 @@ export default async function BillsPage({
     number
   >({
     queryKey: billsQueryKey(filters),
-    queryFn: () =>
-      fetchBillsPage({ ...filters, page: 1, limit: BILLS_PAGE_SIZE }),
+    queryFn: () => fetchBillsPage(toBillsQueryInput(filters, 1)),
     initialPageParam: 1,
   });
   const dehydratedState = dehydrate(queryClient);
