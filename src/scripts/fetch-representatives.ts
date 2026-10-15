@@ -1,14 +1,18 @@
 import "dotenv/config";
-import { fetchGovTrackRoles } from "../lib/govtrack";
+import {
+  currentTerm,
+  fetchCurrentLegislators,
+} from "../lib/congress-legislators";
 import { createStandalonePrisma } from "../lib/prisma-standalone";
 import { nameToSlug } from "../lib/slug";
 
 const prisma = createStandalonePrisma();
 
 /**
- * Normalize a GovTrack `role.district` value for storage.
+ * Normalize a member's district number for storage.
  *
- * GovTrack represents at-large seats (single-district states like SD, VT,
+ * The source (congress-legislators, as GovTrack before it) represents
+ * at-large seats (single-district states like SD, VT,
  * WY, AK, DE, ND) as `0`, which the old `role.district ? ... : null`
  * check silently coerced to null — leaving us unable to match those reps
  * by district and giving civic-lookup a false "delegate" fingerprint.
@@ -67,10 +71,9 @@ async function resolveSlugForCreate(
   return candidates[candidates.length - 1];
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 export async function fetchRepresentativesFunction() {
   try {
-    const roles = await fetchGovTrackRoles({ current: true, limit: 600 });
+    const legislators = await fetchCurrentLegislators();
 
     // Prefetch the bioguideIds we already store so each member costs a single
     // write (update OR create) instead of a find-then-write pair. With ~540
@@ -92,31 +95,34 @@ export async function fetchRepresentativesFunction() {
     let processed = 0;
     const errors: Array<{ bioguideId: string; error: string }> = [];
 
-    for (const role of roles) {
-      const person = role.person;
-      const bioguideId = person.bioguideid;
+    for (const legislator of legislators) {
+      const bioguideId = legislator.id?.bioguide;
+      const term = currentTerm(legislator);
 
-      if (!bioguideId) {
-        console.warn(`No bioguideId for person: ${person.name}`);
+      if (!bioguideId || !term) {
+        console.warn(
+          `Skipping legislator without bioguide id or term: ${legislator.name?.first} ${legislator.name?.last}`,
+        );
         continue;
       }
 
       const imageUrl = `https://bioguide.congress.gov/bioguide/photo/${bioguideId[0]}/${bioguideId}.jpg`;
-      const chamber: string = role.role_type_label.toLowerCase();
-      const district = normalizeDistrict(role.district, chamber);
+      // Delegates and the resident commissioner are "rep" terms too, and are
+      // stored as representatives — same as the GovTrack era.
+      const chamber = term.type === "sen" ? "senator" : "representative";
+      const district = normalizeDistrict(term.district, chamber);
 
-      // Columns shared by create and update. Slug is intentionally absent —
-      // it's set once on create (see resolveSlugForCreate) and never rewritten.
+      // Columns shared by create and update. Slug and link are intentionally
+      // absent — both are set once on create and never rewritten.
       const fields = {
-        firstName: person.firstname,
-        lastName: person.lastname,
-        state: role.state,
+        firstName: legislator.name.first,
+        lastName: legislator.name.last,
+        state: term.state,
         district,
-        party: role.party,
+        party: term.party,
         chamber,
         imageUrl,
-        link: person.link,
-        termEnd: role.enddate ? new Date(role.enddate) : null,
+        termEnd: term.end ? new Date(term.end) : null,
       };
 
       // Per-row try/catch: one bad member (e.g. a slug unique-collision
@@ -131,13 +137,19 @@ export async function fetchRepresentativesFunction() {
           });
         } else {
           const slug = await resolveSlugForCreate(
-            person.firstname,
-            person.lastname,
-            role.state,
+            fields.firstName,
+            fields.lastName,
+            fields.state,
             bioguideId,
           );
+          // Profile link stays on GovTrack, matching existing rows (the rep
+          // page labels it as such). GovTrack routes /congress/members/{id}
+          // without a name slug.
+          const link = legislator.id.govtrack
+            ? `https://www.govtrack.us/congress/members/${legislator.id.govtrack}`
+            : null;
           await prisma.representative.create({
-            data: { bioguideId, slug, ...fields },
+            data: { bioguideId, slug, link, ...fields },
           });
           // Keep the set authoritative within this run so a repeated
           // bioguideId updates the row we just created instead of colliding.
@@ -153,30 +165,32 @@ export async function fetchRepresentativesFunction() {
     }
 
     console.log(
-      `Representatives: ${processed} upserted, ${errors.length} failed (of ${roles.length} roles).`,
+      `Representatives: ${processed} upserted, ${errors.length} failed (of ${legislators.length} members).`,
     );
 
     // Had rows but wrote nothing → the run is broken (DB down, schema drift)
     // even though no exception bubbled out of the loop. Surface it so the
     // route returns 500 + alerts rather than a green success that wrote zero.
-    if (roles.length > 0 && processed === 0) {
+    if (legislators.length > 0 && processed === 0) {
       throw new Error(
-        `fetch-representatives: all ${roles.length} roster rows failed to upsert`,
+        `fetch-representatives: all ${legislators.length} roster rows failed to upsert`,
       );
     }
 
     return { processed, errorCount: errors.length };
-  } catch (error: any) {
-    // Systemic failure (GovTrack unreachable, DB down, or all-rows-failed
+  } catch (error: unknown) {
+    // Systemic failure (roster source unreachable, DB down, or all-rows-failed
     // above). Log and re-throw so the cron route surfaces a 500 + reportError
     // instead of laundering the outage into a green {ok:true}.
-    console.error("Error fetching representatives:", error.message);
+    console.error(
+      "Error fetching representatives:",
+      error instanceof Error ? error.message : error,
+    );
     throw error;
   } finally {
     await prisma.$disconnect();
   }
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 if (require.main === module) {
   fetchRepresentativesFunction();

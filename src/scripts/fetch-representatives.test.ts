@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { normalizeDistrict } from "./fetch-representatives";
 
 describe("normalizeDistrict", () => {
-  it('returns "At Large" for at-large single-district states (GovTrack 0)', () => {
-    // GovTrack returns 0 for the solo reps of SD, VT, WY, AK, DE, ND.
+  it('returns "At Large" for at-large single-district states (district 0)', () => {
+    // The roster source returns 0 for the solo reps of SD, VT, WY, AK, DE, ND.
     // The old `role.district ? ... : null` check coerced this to null and
     // broke district-based lookups — that's how 6 reps ended up uninhabitable.
     expect(normalizeDistrict(0, "representative")).toBe("At Large");
