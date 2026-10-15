@@ -6,7 +6,8 @@ import { reportError } from "@/lib/error-reporting";
 /**
  * GET /api/cron/fetch-representatives
  *
- * Refreshes the Representative roster from GovTrack. Slow-cadence —
+ * Refreshes the Representative roster from the unitedstates/congress-legislators
+ * dataset (see congress-legislators.ts). Slow-cadence —
  * the member list changes rarely (swearing-in, deaths, resignations,
  * special elections). Weekly is plenty.
  *

@@ -7,15 +7,10 @@ import { http, HttpResponse } from "msw";
  * request" error per the `onUnhandledRequest: "error"` setup.
  */
 export const defaultHandlers = [
-  // GovTrack
-  http.get("https://www.govtrack.us/api/v2/bill", () =>
-    HttpResponse.json({ objects: [], meta: { total_count: 0 } }),
-  ),
-  http.get("https://www.govtrack.us/api/v2/bill/:id", () =>
-    HttpResponse.json({}, { status: 404 }),
-  ),
-  http.get("https://www.govtrack.us/api/v2/role", () =>
-    HttpResponse.json({ objects: [], meta: { total_count: 0 } }),
+  // Member roster (fetch-representatives): empty.
+  http.get(
+    "https://unitedstates.github.io/congress-legislators/legislators-current.json",
+    () => HttpResponse.json([]),
   ),
 
   // Roll-call votes (fetch-votes): no House roll published, no Senate votes.
