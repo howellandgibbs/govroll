@@ -19,6 +19,10 @@ import { isTransientCongressError } from "@/lib/congress-api";
  * in isolation every few hours so a Senate roll call at 6pm ET
  * shows up by 10pm ET, not the next morning.
  *
+ * Source: the chambers' own roll-call XML (clerk.house.gov, senate.gov) via
+ * official-votes.ts — GovTrack's API went behind a Cloudflare challenge in
+ * Oct 2026.
+ *
  * Idempotent: fetchVotesFunction upserts by (representativeId,
  * billId, rollCallNumber), so overlapping windows are fine.
  *
@@ -29,7 +33,7 @@ import { isTransientCongressError } from "@/lib/congress-api";
  * force a deep backfill from an explicit date — it advances the cursor
  * per-day, so a backfill bigger than one run's budget resumes on the next.
  *
- * Transient GovTrack failures (timeouts, dropped connections, 429/5xx) are
+ * Transient upstream failures (timeouts, dropped connections, 429/5xx) are
  * non-paging, same as the Congress.gov crons: the run stops with the cursor
  * where it was and the next hourly run re-walks the day. These used to email
  * an alert once or twice a day. A sustained outage still pages — the
@@ -86,9 +90,10 @@ export async function GET(request: Request) {
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     if (isTransientCongressError(error)) {
-      // The classifier is generic over axios errors, so it covers GovTrack.
+      // The classifier is generic over axios errors, so it covers the Clerk
+      // and senate.gov fetches too.
       console.warn(
-        `[fetch-votes cron] stopped on a transient GovTrack error (${msg}); cursor preserved, resuming next run`,
+        `[fetch-votes cron] stopped on a transient upstream error (${msg}); cursor preserved, resuming next run`,
       );
       return NextResponse.json({
         ok: true,
