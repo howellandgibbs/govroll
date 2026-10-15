@@ -99,7 +99,7 @@ export function RepDetailInteractive({
             rel="noopener noreferrer"
             className="text-ink-muted hover:text-ink text-base transition-colors"
           >
-            View full record on GovTrack &rarr;
+            View full record on Congress.gov &rarr;
           </a>
         </div>
       )}

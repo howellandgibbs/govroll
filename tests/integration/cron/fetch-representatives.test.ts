@@ -11,7 +11,6 @@ const LEGISLATORS_URL =
 /** A legislators-current.json entry (unitedstates/congress-legislators). */
 function legislator(o: {
   bioguide: string;
-  govtrack?: number;
   first: string;
   last: string;
   type: "rep" | "sen";
@@ -21,7 +20,7 @@ function legislator(o: {
   end?: string;
 }) {
   return {
-    id: { bioguide: o.bioguide, govtrack: o.govtrack },
+    id: { bioguide: o.bioguide },
     name: { first: o.first, last: o.last },
     terms: [
       {
@@ -56,7 +55,6 @@ describe("GET /api/cron/fetch-representatives", () => {
         HttpResponse.json([
           legislator({
             bioguide: "P000197",
-            govtrack: 400314,
             first: "Nancy",
             last: "Pelosi",
             type: "rep",
@@ -66,7 +64,6 @@ describe("GET /api/cron/fetch-representatives", () => {
           }),
           legislator({
             bioguide: "S000033",
-            govtrack: 400357,
             first: "Bernard",
             last: "Sanders",
             type: "sen",
@@ -100,7 +97,7 @@ describe("GET /api/cron/fetch-representatives", () => {
       chamber: "representative",
       state: "CA",
       district: "11",
-      link: "https://www.govtrack.us/congress/members/400314",
+      link: "https://www.congress.gov/member/nancy-pelosi/P000197",
     });
     expect(pelosi?.termEnd?.toISOString()).toBe("2027-01-03T00:00:00.000Z");
 
@@ -122,11 +119,11 @@ describe("GET /api/cron/fetch-representatives", () => {
     expect(norton).toMatchObject({
       chamber: "representative",
       district: "At Large",
-      link: null,
+      link: "https://www.congress.gov/member/eleanor-norton/N000147",
     });
   });
 
-  it("updates existing members without rewriting slug or link", async () => {
+  it("updates existing members, moving their link to Congress.gov but keeping the slug", async () => {
     const db = getTestPrisma();
     await db.representative.create({
       data: {
@@ -145,7 +142,6 @@ describe("GET /api/cron/fetch-representatives", () => {
         HttpResponse.json([
           legislator({
             bioguide: "S000033",
-            govtrack: 400357,
             first: "Bernard",
             last: "Sanders",
             type: "sen",
@@ -163,7 +159,7 @@ describe("GET /api/cron/fetch-representatives", () => {
     expect(row).toMatchObject({
       party: "Independent",
       slug: "bernie-sanders",
-      link: "https://www.govtrack.us/congress/members/bernard_sanders/400357",
+      link: "https://www.congress.gov/member/bernard-sanders/S000033",
     });
   });
 

@@ -24,7 +24,7 @@ export interface LegislatorTerm {
 }
 
 export interface Legislator {
-  id: { bioguide: string; govtrack?: number };
+  id: { bioguide: string };
   name: { first: string; last: string };
   terms: LegislatorTerm[];
 }
