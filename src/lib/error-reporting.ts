@@ -50,6 +50,16 @@ function fingerprint(message: string, stack?: string): string {
   return `${message}::${firstFrame}`;
 }
 
+/**
+ * Email subjects are a single header line: a raw CR/LF is invalid, and Resend
+ * rejects the send. Multi-line messages (e.g. the ingest-health breach
+ * summary) are collapsed onto one line; the full text stays in the body.
+ */
+export function alertSubject(message: string): string {
+  const oneLine = message.replace(/\s*[\r\n]+\s*/g, " ").trim();
+  return `[Govroll] ${oneLine.slice(0, 100)}`;
+}
+
 export async function reportError(
   error: unknown,
   context?: Record<string, unknown>,
@@ -89,7 +99,7 @@ export async function reportError(
     process.env.ALERT_FROM_EMAIL || "Govroll Alerts <alerts@govroll.org>";
 
   try {
-    await fetch("https://api.resend.com/emails", {
+    const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -98,7 +108,7 @@ export async function reportError(
       body: JSON.stringify({
         from,
         to: alertEmail,
-        subject: `[Govroll] ${err.message.slice(0, 100)}`,
+        subject: alertSubject(err.message),
         text: [
           `Error: ${err.message}`,
           `Time:  ${new Date().toISOString()}`,
@@ -109,6 +119,16 @@ export async function reportError(
           .join("\n\n"),
       }),
     });
+    // fetch doesn't throw on HTTP errors. Without this check a rejected send
+    // (e.g. a 422 on a malformed subject) vanished silently — which is how the
+    // ingest-health watchdog paged into nothing during the Oct 2026 GovTrack
+    // outage.
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(
+        `Error alert email rejected by Resend: HTTP ${res.status} ${body.slice(0, 500)}`,
+      );
+    }
   } catch {
     // Don't let alerting failures break the app
     console.error("Failed to send error alert email");
