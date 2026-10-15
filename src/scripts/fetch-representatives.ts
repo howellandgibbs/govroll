@@ -4,7 +4,7 @@ import {
   fetchCurrentLegislators,
 } from "../lib/congress-legislators";
 import { createStandalonePrisma } from "../lib/prisma-standalone";
-import { nameToSlug } from "../lib/slug";
+import { congressGovMemberUrl, nameToSlug } from "../lib/slug";
 
 const prisma = createStandalonePrisma();
 
@@ -112,8 +112,8 @@ export async function fetchRepresentativesFunction() {
       const chamber = term.type === "sen" ? "senator" : "representative";
       const district = normalizeDistrict(term.district, chamber);
 
-      // Columns shared by create and update. Slug and link are intentionally
-      // absent — both are set once on create and never rewritten.
+      // Columns shared by create and update. Slug is intentionally absent —
+      // it's set once on create (see resolveSlugForCreate) and never rewritten.
       const fields = {
         firstName: legislator.name.first,
         lastName: legislator.name.last,
@@ -122,6 +122,11 @@ export async function fetchRepresentativesFunction() {
         party: term.party,
         chamber,
         imageUrl,
+        link: congressGovMemberUrl(
+          bioguideId,
+          legislator.name.first,
+          legislator.name.last,
+        ),
         termEnd: term.end ? new Date(term.end) : null,
       };
 
@@ -142,14 +147,8 @@ export async function fetchRepresentativesFunction() {
             fields.state,
             bioguideId,
           );
-          // Profile link stays on GovTrack, matching existing rows (the rep
-          // page labels it as such). GovTrack routes /congress/members/{id}
-          // without a name slug.
-          const link = legislator.id.govtrack
-            ? `https://www.govtrack.us/congress/members/${legislator.id.govtrack}`
-            : null;
           await prisma.representative.create({
-            data: { bioguideId, slug, link, ...fields },
+            data: { bioguideId, slug, ...fields },
           });
           // Keep the set authoritative within this run so a repeated
           // bioguideId updates the row we just created instead of colliding.
