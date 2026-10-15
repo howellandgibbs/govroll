@@ -260,7 +260,7 @@ function toCongressIso(d: Dayjs): string {
   return d.toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-async function fetchSpecificBills(billIds: string[]): Promise<void> {
+export async function fetchSpecificBills(billIds: string[]): Promise<void> {
   console.log(`Fetching ${billIds.length} specific bills:`, billIds);
   for (const billId of billIds) {
     try {

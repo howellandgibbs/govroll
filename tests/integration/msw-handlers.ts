@@ -17,11 +17,20 @@ export const defaultHandlers = [
   http.get("https://www.govtrack.us/api/v2/role", () =>
     HttpResponse.json({ objects: [], meta: { total_count: 0 } }),
   ),
-  http.get("https://www.govtrack.us/api/v2/vote", () =>
-    HttpResponse.json({ objects: [], meta: { total_count: 0 } }),
+
+  // Roll-call votes (fetch-votes): no House roll published, no Senate votes.
+  http.get("https://clerk.house.gov/evs/*", () =>
+    HttpResponse.text("", { status: 404 }),
   ),
-  http.get("https://www.govtrack.us/api/v2/vote_voter", () =>
-    HttpResponse.json({ objects: [], meta: { total_count: 0 } }),
+  http.get("https://www.senate.gov/legislative/LIS/roll_call_lists/*", () =>
+    HttpResponse.text("", { status: 404 }),
+  ),
+  http.get("https://www.senate.gov/legislative/LIS/roll_call_votes/*", () =>
+    HttpResponse.text("", { status: 404 }),
+  ),
+  http.get(
+    "https://www.senate.gov/legislative/LIS_MEMBER/cvc_member_data.xml",
+    () => HttpResponse.text("<senators></senators>"),
   ),
 
   // Congress.gov
