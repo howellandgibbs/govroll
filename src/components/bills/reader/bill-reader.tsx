@@ -150,7 +150,6 @@ export function BillReader({
   const autoExpandAll = useMemo(() => shouldAutoExpand(sections), [sections]);
 
   const congressGovUrl = congressGovBillTextUrl({ billId: bill.billId });
-  const govtrackUrl = bill.govtrackUrl;
 
   return (
     <ScrollSpyProvider slugsInOrder={slugsInOrder}>
@@ -161,7 +160,6 @@ export function BillReader({
         billId={bill.id}
         outlineEntries={outlineEntries}
         congressGovUrl={congressGovUrl}
-        govtrackUrl={govtrackUrl}
       >
         <div className="bill-prose-page min-h-screen">
           <StickyBreadcrumb
@@ -174,7 +172,6 @@ export function BillReader({
             <OutlineRail
               entries={outlineEntries}
               congressGovUrl={congressGovUrl}
-              govtrackUrl={govtrackUrl}
             />
 
             <main
@@ -217,11 +214,8 @@ export function BillReader({
                 })}
               </article>
 
-              {(congressGovUrl || govtrackUrl) && (
-                <SourceFooter
-                  congressGovUrl={congressGovUrl}
-                  govtrackUrl={govtrackUrl}
-                />
+              {congressGovUrl && (
+                <SourceFooter congressGovUrl={congressGovUrl} />
               )}
             </main>
           </div>
@@ -238,30 +232,14 @@ export function BillReader({
  * Sources block is the always-visible counterpart for in-flight
  * verification.
  */
-function SourceFooter({
-  congressGovUrl,
-  govtrackUrl,
-}: {
-  congressGovUrl: string | null;
-  govtrackUrl: string | null;
-}) {
+function SourceFooter({ congressGovUrl }: { congressGovUrl: string }) {
   return (
     <footer
       aria-label="Bill text source"
       className="text-ink-muted bill-prose-meta border-rule mt-12 border-t pt-4 text-xs"
     >
       <p>
-        {congressGovUrl ? (
-          <>
-            Source:{" "}
-            <SourceFooterLink href={congressGovUrl} label="Congress.gov" />
-          </>
-        ) : null}
-        {congressGovUrl && govtrackUrl ? " · Also on " : null}
-        {!congressGovUrl && govtrackUrl ? "Source: " : null}
-        {govtrackUrl ? (
-          <SourceFooterLink href={govtrackUrl} label="GovTrack" />
-        ) : null}
+        Source: <SourceFooterLink href={congressGovUrl} label="Congress.gov" />
       </p>
     </footer>
   );

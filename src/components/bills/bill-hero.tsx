@@ -6,6 +6,7 @@ import { AiSummaryFeedback } from "@/components/bills/ai-summary-feedback";
 import { pickBillHeadline } from "@/lib/bill-headline";
 import { formatBillNumber } from "@/lib/bill-grouping";
 import { formatOrdinal } from "@/lib/parse-bill-citation";
+import { congressGovBillUrl } from "@/lib/bills/url";
 import { BillStatusBanner } from "./bill-status-banner";
 import type { MomentumTier, DeathReason } from "@/types";
 
@@ -24,7 +25,6 @@ interface BillHeroProps {
   billType: string;
   billId: string;
   congressNumber: number | null;
-  link: string | null;
   readerHref: string | null;
   introducedDate: string;
   lastActionDate: string | null;
@@ -39,6 +39,8 @@ interface BillHeroProps {
 export function BillHero(props: BillHeroProps) {
   const [crsExpanded, setCrsExpanded] = useState(false);
   const [titleExpanded, setTitleExpanded] = useState(false);
+
+  const congressGovUrl = congressGovBillUrl({ billId: props.billId });
 
   const isInactive =
     props.momentumTier === "DEAD" ||
@@ -212,8 +214,8 @@ export function BillHero(props: BillHeroProps) {
         </div>
       ) : null}
 
-      {/* Primary actions row — read full text + GovTrack */}
-      {(props.readerHref || props.link) && (
+      {/* Primary actions row — read full text + Congress.gov */}
+      {(props.readerHref || congressGovUrl) && (
         <div className="flex flex-wrap items-center gap-3 pt-1">
           {props.readerHref && (
             <a
@@ -251,14 +253,14 @@ export function BillHero(props: BillHeroProps) {
               </svg>
             </a>
           )}
-          {props.link && (
+          {congressGovUrl && (
             <a
-              href={props.link}
+              href={congressGovUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5 text-sm transition-colors"
             >
-              GovTrack
+              Congress.gov
               <svg
                 className="h-3 w-3"
                 fill="none"

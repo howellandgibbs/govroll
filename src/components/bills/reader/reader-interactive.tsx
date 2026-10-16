@@ -30,13 +30,11 @@ export function ReaderInteractive({
   billId,
   outlineEntries,
   congressGovUrl,
-  govtrackUrl,
   children,
 }: {
   billId: number;
   outlineEntries: OutlineEntry[];
   congressGovUrl: string | null;
-  govtrackUrl: string | null;
   children: ReactNode;
 }) {
   const [chatOpen, setChatOpen] = useState(false);
@@ -100,7 +98,6 @@ export function ReaderInteractive({
         onOpenChange={setOutlineOpen}
         entries={outlineEntries}
         congressGovUrl={congressGovUrl}
-        govtrackUrl={govtrackUrl}
       />
 
       <AiChatbox
