@@ -20,11 +20,9 @@ import { SourceLinks } from "./source-links";
 export function OutlineRail({
   entries,
   congressGovUrl,
-  govtrackUrl,
 }: {
   entries: OutlineEntry[];
   congressGovUrl: string | null;
-  govtrackUrl: string | null;
 }) {
   return (
     <aside
@@ -36,10 +34,7 @@ export function OutlineRail({
       </h2>
       <OutlineTree entries={entries} />
       <div className="border-rule mt-auto border-t pt-4">
-        <SourceLinks
-          congressGovUrl={congressGovUrl}
-          govtrackUrl={govtrackUrl}
-        />
+        <SourceLinks congressGovUrl={congressGovUrl} />
       </div>
     </aside>
   );

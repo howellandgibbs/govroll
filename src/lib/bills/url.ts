@@ -13,6 +13,8 @@
  * as non-canonical so the caller can 301 to the canonical shape.
  */
 
+import { formatOrdinal } from "@/lib/parse-bill-citation";
+
 export const BILL_TYPE_TO_CHAMBER_CODE = {
   house_bill: "hr",
   senate_bill: "s",
@@ -137,6 +139,27 @@ export function billReadHref(bill: BillForUrl): string {
 }
 
 /**
+ * Canonical Congress.gov overview page for a bill.
+ *   `https://www.congress.gov/bill/119th-congress/house-resolution/1156`
+ *
+ * Built from the billId rather than the legacy `Bill.link` column, which
+ * holds GovTrack URLs for most rows (GovTrack puts visitors through a bot
+ * check since Oct 2026).
+ */
+export function congressGovBillUrl(bill: { billId: string }): string | null {
+  const parsed = parseBillIdentifier(bill.billId);
+  if (!parsed) return null;
+  const chamberCode =
+    BILL_TYPE_TO_CHAMBER_CODE[
+      parsed.billType as keyof typeof BILL_TYPE_TO_CHAMBER_CODE
+    ];
+  if (!chamberCode) return null;
+  const wordForm = CHAMBER_CODE_TO_WORD_FORM[chamberCode];
+  if (!wordForm) return null;
+  return `https://www.congress.gov/bill/${formatOrdinal(parsed.congress)}-congress/${wordForm}/${parsed.number}`;
+}
+
+/**
  * Canonical Congress.gov text URL for a bill.
  *   `https://www.congress.gov/bill/119th-congress/house-resolution/1156/text`
  *
@@ -147,16 +170,8 @@ export function billReadHref(bill: BillForUrl): string {
 export function congressGovBillTextUrl(bill: {
   billId: string;
 }): string | null {
-  const parsed = parseBillIdentifier(bill.billId);
-  if (!parsed) return null;
-  const chamberCode =
-    BILL_TYPE_TO_CHAMBER_CODE[
-      parsed.billType as keyof typeof BILL_TYPE_TO_CHAMBER_CODE
-    ];
-  if (!chamberCode) return null;
-  const wordForm = CHAMBER_CODE_TO_WORD_FORM[chamberCode];
-  if (!wordForm) return null;
-  return `https://www.congress.gov/bill/${parsed.congress}th-congress/${wordForm}/${parsed.number}/text`;
+  const base = congressGovBillUrl(bill);
+  return base ? `${base}/text` : null;
 }
 
 /**

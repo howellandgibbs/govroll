@@ -159,10 +159,10 @@ export default function HowCongressVotesPage() {
       <section className="space-y-3">
         <h2 className="text-xl font-semibold">Sources</h2>
         <p className="text-ink-muted text-base leading-relaxed">
-          Our vote data comes from the House Clerk and Senate Clerk roll-call
-          records, aggregated by GovTrack and Congress.gov. For deeper reading,
-          the Congressional Research Service publishes plain-English explainers
-          of{" "}
+          Our vote data comes straight from the official roll-call records
+          published by the Clerk of the House and the U.S. Senate, and bill
+          details come from Congress.gov. For deeper reading, the Congressional
+          Research Service publishes plain-English explainers of{" "}
           <a
             href="https://www.congress.gov/crs-product/98-314"
             target="_blank"

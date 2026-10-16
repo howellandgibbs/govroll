@@ -6,6 +6,8 @@ import {
   parseBillIdentifier,
   parseBillPath,
   slugifyTitle,
+  congressGovBillTextUrl,
+  congressGovBillUrl,
 } from "@/lib/bills/url";
 
 describe("slugifyTitle", () => {
@@ -202,5 +204,44 @@ describe("parseBillPath", () => {
 
   it("rejects malformed congress word form", () => {
     expect(parseBillPath(["congress-118", "s", "1"])).toBeNull();
+  });
+});
+
+describe("congressGovBillUrl", () => {
+  it("builds the Congress.gov overview path from a billId", () => {
+    expect(congressGovBillUrl({ billId: "house_resolution-1156-119" })).toBe(
+      "https://www.congress.gov/bill/119th-congress/house-resolution/1156",
+    );
+    expect(congressGovBillUrl({ billId: "senate_bill-3706-118" })).toBe(
+      "https://www.congress.gov/bill/118th-congress/senate-bill/3706",
+    );
+  });
+
+  it("uses the right ordinal for every Congress", () => {
+    // Bills go back to the 93rd Congress (1973); "101th" etc. was wrong.
+    expect(congressGovBillUrl({ billId: "house_bill-1-101" })).toContain(
+      "/101st-congress/",
+    );
+    expect(congressGovBillUrl({ billId: "house_bill-1-102" })).toContain(
+      "/102nd-congress/",
+    );
+    expect(congressGovBillUrl({ billId: "house_bill-1-93" })).toContain(
+      "/93rd-congress/",
+    );
+    expect(congressGovBillUrl({ billId: "house_bill-1-111" })).toContain(
+      "/111th-congress/",
+    );
+  });
+
+  it("returns null for an unparseable billId", () => {
+    expect(congressGovBillUrl({ billId: "nonsense" })).toBeNull();
+  });
+});
+
+describe("congressGovBillTextUrl", () => {
+  it("appends /text to the overview URL", () => {
+    expect(congressGovBillTextUrl({ billId: "house_bill-9340-119" })).toBe(
+      "https://www.congress.gov/bill/119th-congress/house-bill/9340/text",
+    );
   });
 });

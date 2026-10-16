@@ -34,10 +34,6 @@ export interface ReaderBillMeta {
    *  for short clean titles it's identical to `title`. */
   headline: string;
   billType: string;
-  /** GovTrack URL from the legacy `Bill.link` column. Null when unset
-   *  on older rows; the reader's "Sources" block hides the link in
-   *  that case. */
-  govtrackUrl: string | null;
   /** GovTrack-style status key (e.g. "enacted_signed", "pass_over_senate"). */
   currentStatus: string;
   /** Raw Congress.gov sponsor string, e.g. "Sen. Cornyn, John [R-TX]". */

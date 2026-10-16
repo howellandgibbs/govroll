@@ -28,13 +28,11 @@ export function OutlineSheet({
   onOpenChange,
   entries,
   congressGovUrl,
-  govtrackUrl,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   entries: OutlineEntry[];
   congressGovUrl: string | null;
-  govtrackUrl: string | null;
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -48,10 +46,7 @@ export function OutlineSheet({
             onItemClick={() => onOpenChange(false)}
           />
           <div className="border-rule mt-6 border-t pt-4">
-            <SourceLinks
-              congressGovUrl={congressGovUrl}
-              govtrackUrl={govtrackUrl}
-            />
+            <SourceLinks congressGovUrl={congressGovUrl} />
           </div>
         </div>
       </SheetContent>

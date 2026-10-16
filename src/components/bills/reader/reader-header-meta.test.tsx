@@ -39,7 +39,6 @@ function makeBill(overrides: Partial<ReaderBillMeta> = {}): ReaderBillMeta {
     title: "Victims' VOICES Act",
     headline: "Victims' VOICES Act",
     billType: "senate_bill",
-    govtrackUrl: null,
     currentStatus: "enacted_signed",
     sponsor: "Sen. Cornyn, John [R-TX]",
     displayNumber: "S. 3706",

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { billHref } from "@/lib/bills/url";
+import { billHref, congressGovBillTextUrl } from "@/lib/bills/url";
 
 /**
  * Friendly state for when a bill has no usable text yet (and therefore
@@ -16,9 +16,12 @@ export function TextNotAvailable({
     title: string;
     /** Display headline. Falls back to `title` when omitted. */
     headline?: string;
-    link?: string | null;
   };
 }) {
+  // Built from the billId: the legacy `Bill.link` column mostly holds
+  // GovTrack URLs, which this button used to send people to under a
+  // "Congress.gov" label.
+  const congressGovUrl = congressGovBillTextUrl({ billId: bill.billId });
   return (
     <div className="bg-paper min-h-screen">
       {/* An empty reader shouldn't be indexed. React hoists this into
@@ -45,9 +48,9 @@ export function TextNotAvailable({
           >
             Back to bill page
           </Link>
-          {bill.link ? (
+          {congressGovUrl ? (
             <a
-              href={bill.link}
+              href={congressGovUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="border-rule text-ink hover:bg-muted inline-flex h-10 items-center justify-center border px-4 text-sm font-medium transition-colors"

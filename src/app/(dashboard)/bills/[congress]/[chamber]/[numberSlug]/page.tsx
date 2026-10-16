@@ -180,7 +180,6 @@ export default async function BillDetailPage({
         currentStatus: true,
         currentStatusDate: true,
         introducedDate: true,
-        link: true,
         shortText: true,
         sponsor: true,
         cosponsorCount: true,
@@ -357,7 +356,6 @@ export default async function BillDetailPage({
         billType={bill.billType}
         billId={bill.billId}
         congressNumber={bill.congressNumber}
-        link={bill.link}
         readerHref={
           textVersions.length > 0
             ? billReadHref({ billId: bill.billId, title: bill.title })
