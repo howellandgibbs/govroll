@@ -715,7 +715,7 @@ describe("GET /api/cron/fetch-votes", () => {
   it("stops quietly on a transient upstream outage, leaving that chamber's cursor for the watchdog", async () => {
     // 5xx / timeouts are non-paging: 200 with upstreamPaused, and the House
     // cursor does NOT advance, so ingest-health pages if it stays stuck for
-    // 8h. The Senate, a different source, carries on.
+    // 12h. The Senate, a different source, carries on.
     server.use(
       http.get(
         "https://clerk.house.gov/evs/:year/:file",

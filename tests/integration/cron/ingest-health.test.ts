@@ -73,7 +73,7 @@ describe("GET /api/cron/ingest-health", () => {
   it("flags refresh-metadata as silently stalled (backlog + stale stamp)", async () => {
     await seedFreshCursors();
     // A bill in the metadata gap (shortText null) whose last refresh is well
-    // past the 6h limit — the #139 signature: work queued, nothing advancing.
+    // past the 12h limit — the #139 signature: work queued, nothing advancing.
     await getTestPrisma().bill.create({
       data: {
         billId: "house_bill-1-119",
@@ -85,7 +85,7 @@ describe("GET /api/cron/ingest-health", () => {
         introducedDate: new Date("2026-01-01"),
         link: "https://www.congress.gov/bill/119th-congress/house-bill/1",
         shortText: null,
-        lastMetadataRefreshAt: new Date(Date.now() - 10 * 3_600_000),
+        lastMetadataRefreshAt: new Date(Date.now() - 15 * 3_600_000),
       },
     });
 
