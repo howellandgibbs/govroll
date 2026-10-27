@@ -35,22 +35,27 @@
  */
 
 /** Hours a cursor's `updatedAt` may lag `now()` before we treat the cron as
- *  stuck. Sized to several missed cycles so a delayed/dropped GitHub Actions
- *  run (or a transient quota stop that resumes next run) never trips it —
- *  only a genuine multi-cycle stall does. */
+ *  stuck. Sized to GitHub's real cadence, not the schedule: in Oct 2026 GitHub
+ *  Actions started only about a quarter of the scheduled runs, so every cron
+ *  ran about every 5h whatever its schedule, with gaps of up to 8.8h (Oct
+ *  13–27). 12h clears the worst of those, so a late or dropped run (or a
+ *  transient quota stop that resumes next run) never trips it — only a
+ *  genuine stall does. A run that fails outright alerts on its own. */
 export const CURSOR_STALE_HOURS: Record<string, number> = {
-  // Runs every 3h. 12h ≈ four missed cycles.
+  // Scheduled every 3h.
   "fetch-bills": 12,
-  // fetch-votes runs hourly with one cursor per chamber, so an outage at one
-  // chamber's source pages for that chamber alone. 8h ≈ eight missed cycles —
-  // comfortably a real stall, not a dropped GitHub run.
-  "fetch-votes-house": 8,
-  "fetch-votes-senate": 8,
+  // Scheduled hourly, with one cursor per chamber, so an outage at one
+  // chamber's source pages for that chamber alone.
+  "fetch-votes-house": 12,
+  "fetch-votes-senate": 12,
 };
 
 /** Hours a rotating backfill's newest progress stamp may lag before we treat
- *  it as silently stalled (running but not advancing). */
-export const BACKFILL_STALE_HOURS = 6;
+ *  it as silently stalled (running but not advancing). The stamp moves only
+ *  when GitHub runs the cron, so it needs the same headroom as the cursors:
+ *  15 of 75 gaps between refresh-bill-metadata runs (Oct 13–27) were longer
+ *  than 6h, and a 6h limit paged on 2026-10-27 with nothing wrong. */
+export const BACKFILL_STALE_HOURS = 12;
 
 export interface CursorSignal {
   key: string;

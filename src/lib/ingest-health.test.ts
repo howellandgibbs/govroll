@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  BACKFILL_STALE_HOURS,
+  CURSOR_STALE_HOURS,
   evaluateIngestHealth,
   evaluateSenateVotes,
   senateRollCallNumber,
@@ -7,6 +9,16 @@ import {
 
 const NOW = new Date("2026-06-16T12:00:00Z");
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
+
+describe("stale limits", () => {
+  // GitHub Actions starts scheduled runs late or not at all: in Oct 2026 every
+  // cron ran about every 5h, with gaps of up to 8.8h. A limit inside that
+  // spread pages on a normal day, as the 6h backfill limit did on Oct 27.
+  it("clear GitHub's worst observed gap between runs", () => {
+    const limits = [...Object.values(CURSOR_STALE_HOURS), BACKFILL_STALE_HOURS];
+    for (const hours of limits) expect(hours).toBeGreaterThan(9);
+  });
+});
 
 describe("evaluateIngestHealth", () => {
   it("reports no breaches when everything is fresh", () => {
