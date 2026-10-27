@@ -133,10 +133,12 @@ export function evaluateIngestHealth(input: IngestHealthInput): HealthBreach[] {
 
 /** Hours past the end of a Senate roll call's day that RepresentativeVote may
  *  still lack it. Voteview publishes overnight (Sep 30's votes were in its
- *  files by 07:00 UTC Oct 1) and fetch-votes runs hourly, so a healthy
- *  pipeline has the vote by the next morning; 36h rides out a whole missed
- *  night on top. Counted from the day's end because Congress.gov dates an
- *  action but doesn't time it. */
+ *  files by 07:00 UTC Oct 1) and every fetch-votes run re-reads the last two
+ *  days, so a healthy pipeline has the vote by the next midday — even with
+ *  GitHub running only a quarter to a third of the hourly schedule, as it
+ *  did in Oct 2026 (4–5h gaps). 36h rides out a whole missed night on top.
+ *  Counted from the day's end because Congress.gov dates an action but
+ *  doesn't time it. */
 export const SENATE_VOTE_GRACE_HOURS = 36;
 
 /** How far back roll calls are checked. A vote missing for longer is a
