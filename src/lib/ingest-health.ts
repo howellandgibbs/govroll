@@ -19,6 +19,17 @@
  *      Caught here as a backfill whose newest progress timestamp has gone stale
  *      while it still has bills queued.
  *
+ *   3. A vote source that answers but has STOPPED PUBLISHING — fetch-votes
+ *      walks each day, finds no roll calls, and advances its cursor exactly as
+ *      it does through a recess, so neither check above can see it. The Senate
+ *      is where this bites: while senate.gov refuses server-side clients, its
+ *      votes come from Voteview, a mirror that publishes overnight. Caught here
+ *      against an independent record of the votes — Congress.gov's own Senate
+ *      actions, which name each roll call ("Record Vote Number: 253") — as a
+ *      roll call Congress.gov recorded that RepresentativeVote still lacks a
+ *      day and a half later. Only votes that actually happened are checked, so
+ *      a weekend or a recess (no votes) can't trip it.
+ *
  * This module is pure so it can be unit-tested without a DB; the route gathers
  * the signals and does the alerting.
  */
@@ -118,4 +129,126 @@ export function evaluateIngestHealth(input: IngestHealthInput): HealthBreach[] {
   }
 
   return breaches;
+}
+
+/** Hours past the end of a Senate roll call's day that RepresentativeVote may
+ *  still lack it. Voteview publishes overnight (Sep 30's votes were in its
+ *  files by 07:00 UTC Oct 1) and every fetch-votes run re-reads the last two
+ *  days, so a healthy pipeline has the vote by the next midday — even with
+ *  GitHub running only a quarter to a third of the hourly schedule, as it
+ *  did in Oct 2026 (4–5h gaps). 36h rides out a whole missed night on top.
+ *  Counted from the day's end because Congress.gov dates an action but
+ *  doesn't time it. */
+export const SENATE_VOTE_GRACE_HOURS = 36;
+
+/** How far back roll calls are checked. A vote missing for longer is a
+ *  backfill job (fetch-votes ?since=), not a live stall — and without the
+ *  bound, one old gap would page through every recess after it. */
+export const SENATE_VOTE_LOOKBACK_DAYS = 7;
+
+/** Days either side of Congress.gov's action date that a stored roll call
+ *  may fall and still match. Vote numbers restart every session, so a
+ *  same-numbered vote from another year must not count. */
+export const SENATE_VOTE_MATCH_DAYS = 3;
+
+/** An action Congress.gov published on one of our bills: its latest action
+ *  (kept current by fetch-bills) or a row of its action history
+ *  (backfill-bill-actions). Only Senate roll calls are read from it. */
+export interface CongressActionSignal {
+  billId: string;
+  /** Congress.gov's actionDate — a calendar day, stored at UTC midnight. */
+  actionDate: Date;
+  text: string;
+}
+
+/** A Senate roll call RepresentativeVote holds. */
+export interface StoredRollCallSignal {
+  rollCallNumber: number;
+  votedAt: Date;
+}
+
+export interface SenateVoteInput {
+  now: Date;
+  actions: CongressActionSignal[];
+  stored: StoredRollCallSignal[];
+}
+
+const MS_PER_DAY = 24 * MS_PER_HOUR;
+
+/** Missing roll calls named in the breach before the rest become "+N more". */
+const MAX_LISTED = 5;
+
+/**
+ * The Senate roll call an action records, or null. Congress.gov writes every
+ * one the same way — "…by Yea-Nay Vote. 53 - 46. Record Vote Number: 253." —
+ * the shape of every such action we've stored since 2023. The House writes
+ * "(Roll no. 456)" instead. The older "Record Vote No. 38" now only turns up
+ * in motions to reconsider, citing a vote taken anywhere up to weeks before
+ * the motion's date, so it isn't read.
+ */
+export function senateRollCallNumber(text: string): number | null {
+  const m = text.match(
+    /Yea-Nay Vote\.\s*\d+\s*-\s*\d+\.\s*Record Vote Number:\s*(\d+)/,
+  );
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * One breach when Congress.gov has recorded a Senate roll call on one of our
+ * bills that RepresentativeVote still lacks SENATE_VOTE_GRACE_HOURS after the
+ * vote's day ended (empty array = healthy). Pure, like evaluateIngestHealth.
+ *
+ * Only some roll calls are visible this way — those still a bill's latest
+ * action, or in an action history backfill-bill-actions has re-fetched — but
+ * a stalled source misses every vote, so a stall across a voting week shows.
+ */
+export function evaluateSenateVotes(input: SenateVoteInput): HealthBreach[] {
+  const now = input.now.getTime();
+  const oldest = now - SENATE_VOTE_LOOKBACK_DAYS * MS_PER_DAY;
+  // Keyed by vote: a bill's latest action and its history can name the same one.
+  const missing = new Map<
+    string,
+    { rollCallNumber: number; day: Date; billId: string }
+  >();
+
+  for (const a of input.actions) {
+    const rollCallNumber = senateRollCallNumber(a.text);
+    if (rollCallNumber === null) continue;
+    const day = a.actionDate.getTime();
+    if (day < oldest) continue;
+    const dueAt = day + MS_PER_DAY + SENATE_VOTE_GRACE_HOURS * MS_PER_HOUR;
+    if (now <= dueAt) continue;
+    const stored = input.stored.some(
+      (s) =>
+        s.rollCallNumber === rollCallNumber &&
+        Math.abs(s.votedAt.getTime() - day) <=
+          SENATE_VOTE_MATCH_DAYS * MS_PER_DAY,
+    );
+    if (!stored) {
+      missing.set(`${rollCallNumber}@${day}`, {
+        rollCallNumber,
+        day: a.actionDate,
+        billId: a.billId,
+      });
+    }
+  }
+
+  if (missing.size === 0) return [];
+  const list = [...missing.values()].sort(
+    (x, y) =>
+      x.day.getTime() - y.day.getTime() || x.rollCallNumber - y.rollCallNumber,
+  );
+  const named = list
+    .slice(0, MAX_LISTED)
+    .map(
+      (m) =>
+        `#${m.rollCallNumber} on ${m.day.toISOString().slice(0, 10)} (${m.billId})`,
+    );
+  if (list.length > MAX_LISTED) named.push(`+${list.length - MAX_LISTED} more`);
+  return [
+    {
+      pipeline: "fetch-votes-senate",
+      detail: `${list.length} Senate roll call${list.length === 1 ? "" : "s"} Congress.gov recorded still not stored ${SENATE_VOTE_GRACE_HOURS}h after the day ${list.length === 1 ? "it was" : "they were"} cast: ${named.join(", ")} — the Senate vote source stopped publishing, or fetch-votes can't read it`,
+    },
+  ];
 }
