@@ -4,11 +4,17 @@ import { prisma } from "@/lib/prisma";
 import { reportError } from "@/lib/error-reporting";
 import {
   evaluateIngestHealth,
+  evaluateSenateVotes,
   CURSOR_STALE_HOURS,
   BACKFILL_STALE_HOURS,
+  SENATE_VOTE_LOOKBACK_DAYS,
+  SENATE_VOTE_MATCH_DAYS,
   type CursorSignal,
   type BackfillSignal,
+  type CongressActionSignal,
 } from "@/lib/ingest-health";
+
+const MS_PER_DAY = 86_400_000;
 
 /**
  * GET /api/cron/ingest-health
@@ -16,10 +22,12 @@ import {
  * Freshness watchdog for the ingest fleet. The Congress.gov crons now stop
  * cleanly on a transient 429 (no longer paging), so the remaining real risks
  * are a SUSTAINED stall — a cron that stopped running or is chronically
- * quota-blocked — and a SILENT zero-progress run (the #139 class). Neither
- * surfaces as a failed request, so this watchdog inspects the durable evidence
- * instead: cursor `updatedAt` and backfill progress stamps. See
- * lib/ingest-health for why those signals are weekend-proof.
+ * quota-blocked — a SILENT zero-progress run (the #139 class), and a vote
+ * source that answers but has stopped publishing. None surfaces as a failed
+ * request, so this watchdog inspects the durable evidence instead: cursor
+ * `updatedAt`, backfill progress stamps, and Senate roll calls Congress.gov
+ * recorded that RepresentativeVote lacks. See lib/ingest-health for why those
+ * signals are weekend- and recess-proof.
  *
  * Emits at most one alert per run while a breach persists (reportError dedupes
  * within 5 min and rate-limits to 10/hr), so a genuine multi-hour outage nags
@@ -43,7 +51,18 @@ export async function GET(request: Request) {
   }
 
   try {
-    const [cursorRows, metaAgg, metaBacklog] = await Promise.all([
+    const now = new Date();
+    const actionsSince = new Date(
+      now.getTime() - SENATE_VOTE_LOOKBACK_DAYS * MS_PER_DAY,
+    );
+    const [
+      cursorRows,
+      metaAgg,
+      metaBacklog,
+      latestActions,
+      actionHistory,
+      senateRollCalls,
+    ] = await Promise.all([
       prisma.ingestCursor.findMany({ select: { key: true, updatedAt: true } }),
       prisma.bill.aggregate({ _max: { lastMetadataRefreshAt: true } }),
       // The refresh-metadata cron's exact eligibility gap. shortText is null for
@@ -57,6 +76,45 @@ export async function GET(request: Request) {
             { sponsorBioguideId: null },
             { shortText: null },
           ],
+        },
+      }),
+      // Senate roll calls Congress.gov has recorded, read from action text the
+      // pipeline already stores — no Congress.gov calls of our own. A bill's
+      // latest action is current (fetch-bills, every 3h) but holds one vote;
+      // its action history holds them all but is re-fetched only now and then.
+      prisma.bill.findMany({
+        where: {
+          latestActionDate: { gte: actionsSince },
+          latestActionText: { contains: "Record Vote Number" },
+        },
+        select: {
+          billId: true,
+          latestActionText: true,
+          latestActionDate: true,
+        },
+      }),
+      prisma.billAction.findMany({
+        where: {
+          actionDate: { gte: actionsSince },
+          text: { contains: "Record Vote Number" },
+        },
+        select: {
+          actionDate: true,
+          text: true,
+          bill: { select: { billId: true } },
+        },
+      }),
+      // One row per stored Senate roll call. Served by the (chamber, votedAt)
+      // index; chamber is stored lowercase.
+      prisma.representativeVote.groupBy({
+        by: ["rollCallNumber", "votedAt"],
+        where: {
+          chamber: "senate",
+          votedAt: {
+            gte: new Date(
+              actionsSince.getTime() - SENATE_VOTE_MATCH_DAYS * MS_PER_DAY,
+            ),
+          },
         },
       }),
     ]);
@@ -79,11 +137,34 @@ export async function GET(request: Request) {
       },
     ];
 
-    const breaches = evaluateIngestHealth({
-      now: new Date(),
-      cursors,
-      backfills,
-    });
+    const actions: CongressActionSignal[] = [
+      ...latestActions.flatMap((b) =>
+        b.latestActionText && b.latestActionDate
+          ? [
+              {
+                billId: b.billId,
+                actionDate: b.latestActionDate,
+                text: b.latestActionText,
+              },
+            ]
+          : [],
+      ),
+      ...actionHistory.map((a) => ({
+        billId: a.bill.billId,
+        actionDate: a.actionDate,
+        text: a.text,
+      })),
+    ];
+    const stored = senateRollCalls.flatMap((r) =>
+      r.rollCallNumber != null && r.votedAt
+        ? [{ rollCallNumber: r.rollCallNumber, votedAt: r.votedAt }]
+        : [],
+    );
+
+    const breaches = [
+      ...evaluateIngestHealth({ now, cursors, backfills }),
+      ...evaluateSenateVotes({ now, actions, stored }),
+    ];
 
     if (breaches.length > 0) {
       const summary = breaches
