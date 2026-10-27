@@ -1,6 +1,6 @@
 import axios from "axios";
 import { parseStringPromise } from "xml2js";
-import { withRetry } from "./congress-api";
+import { isTransientCongressError, withRetry } from "./congress-api";
 
 /**
  * Roll-call votes straight from the chambers' own publications:
@@ -20,6 +20,10 @@ import { withRetry } from "./congress-api";
  *
  * Errors go through withRetry + axios so the cron's transient classifier
  * (isTransientCongressError) treats a 5xx/429/network drop as backpressure.
+ *
+ * senate.gov's Akamai WAF has refused every server-side client (403, a
+ * browser-only challenge) since 2026-10-23; fetch-votes then reads the Senate
+ * from Voteview instead (voteview.ts).
  */
 
 const USER_AGENT = "Govroll/1.0 (+https://govroll.com; civic transparency)";
@@ -30,6 +34,17 @@ const http = axios.create({
   // clerk.house.gov 406s requests that ask for application/xml only.
   headers: { "User-Agent": USER_AGENT, Accept: "text/xml, application/xml" },
 });
+
+/** GET, retrying only transient failures: a refusal (senate.gov's WAF 403) or
+ *  a 404 is an answer, and asking again just repeats it. */
+function get(url: string) {
+  return withRetry(
+    () => http.get<string>(url),
+    2,
+    1000,
+    isTransientCongressError,
+  );
+}
 
 export type VoteChamber = "house" | "senate";
 
@@ -127,6 +142,68 @@ export function voteCategory(question: string): string {
   return "unknown";
 }
 
+/**
+ * Port of normalize_vote_type(), also from vote_info.py, which upstream runs
+ * on a Senate question before categorizing it. As with Python's re.match, a rule
+ * must match from the start, and its replacement stands in for the whole
+ * question ("On the Cloture Motion S. 5" → "On the Cloture Motion").
+ */
+const VOTE_TYPE_RULES: [RegExp, string][] = [
+  [
+    /^On the Resolution of Ratification.*/i,
+    "On the Resolution of Ratification",
+  ],
+  [
+    /^On (Agreeing to )?the (Joint |Concurrent )?Resolution/i,
+    "On the $2Resolution",
+  ],
+  [/^On (Agreeing to )?the Conference Report/i, "On the Conference Report"],
+  [/^On (Agreeing to )?the (En Bloc )?Amendments?/i, "On the Amendment"],
+  [/^On (?:the )?Motion to Recommit/i, "On the Motion to Recommit"],
+  [
+    /^(On Motion to )?(Concur in|Concurring|On Concurring|Agree to|On Agreeing to) (the )?Senate (Amendment|amdt|Adt)s?/i,
+    "Concurring in the Senate Amendment",
+  ],
+  [
+    /^(On Motion to )?Suspend (the )?Rules and (Agree|Concur|Pass)(, As Amended)/i,
+    "On Motion to Suspend the Rules and $3$4",
+  ],
+  [
+    /^(?:Will the House Now Consider the Resolution|On (Question of )?Consideration of the Resolution)/i,
+    "On Consideration of the Resolution",
+  ],
+  [/^On (the )?Motion to Adjourn/i, "On the Motion to Adjourn"],
+  [/^On (the )?Cloture Motion/i, "On the Cloture Motion"],
+  [/^On Cloture on the Motion to Proceed/i, "On the Cloture Motion"],
+  [/^On (the )?Nomination/i, "On the Nomination"],
+  [/^On Passage( of the Bill|$)/i, "On Passage of the Bill"],
+  [/^On (the )?Motion to Proceed/i, "On the Motion to Proceed"],
+  [
+    /^On the Motion \(Motion to ((Recede )from the Senate Amendment to \S+ \d+ (and ))?Concur( with Further Amendment)?/i,
+    "On the Motion to $2$3Concur$4",
+  ],
+  [/^On the Motion \(Motion to (.*)\)$/i, "On the Motion to $1"],
+];
+
+export function normalizeVoteType(question: string): string {
+  const q = question.trim();
+  for (const [re, replacement] of VOTE_TYPE_RULES) {
+    const m = q.match(re);
+    if (m) return replacement.replace(/\$(\d)/g, (_, i) => m[Number(i)] ?? "");
+  }
+  return q;
+}
+
+/**
+ * A Senate vote's category, derived as upstream does: from the full question
+ * text ("On the Motion (Motion to Concur in the House Amendment …)"),
+ * normalized first. The short form ("On the Motion") can't tell a motion to
+ * concur (passage) from a motion to waive (procedural).
+ */
+export function senateVoteCategory(questionText: string): string {
+  return voteCategory(normalizeVoteType(questionText));
+}
+
 // ── Bill references ─────────────────────────────────────────────────────────
 
 /** House legis-num prefixes ("H R 1234") → canonical Bill.billType. */
@@ -153,7 +230,7 @@ const SENATE_BILL_TYPES: Record<string, string> = {
   "S.Con.Res.": "senate_concurrent_resolution",
 };
 
-function canonicalBillId(
+export function canonicalBillId(
   billType: string | undefined,
   number: number,
   congress: number,
@@ -300,7 +377,7 @@ export async function fetchHouseRollCall(
 ): Promise<ParsedRollCall | null> {
   const url = `https://clerk.house.gov/evs/${year}/roll${String(n).padStart(3, "0")}.xml`;
   try {
-    const res = await withRetry(() => http.get<string>(url));
+    const res = await get(url);
     return parseHouseRollCall(res.data);
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
@@ -343,7 +420,7 @@ export async function fetchSenateVoteMenu(
   const { congress, session } = congressForYear(year);
   const url = `https://www.senate.gov/legislative/LIS/roll_call_lists/vote_menu_${congress}_${session}.xml`;
   try {
-    const res = await withRetry(() => http.get<string>(url));
+    const res = await get(url);
     return parseSenateVoteMenu(res.data);
   } catch (error) {
     // A session with no votes yet (early January) has no menu.
@@ -374,11 +451,12 @@ export async function parseSenateRollCall(
   const hour = (Number(m[4]) % 12) + (m[6] === "PM" ? 12 : 0);
 
   // Upstream classifies on the vote_question element, falling back to the
-  // longer question text; current files carry the short form in <question>.
+  // full question text and then the short <question>. Current files have no
+  // vote_question, so it's the full text.
   const question =
     text(root.vote_question) ||
-    text(root.question) ||
-    text(root.vote_question_text);
+    text(root.vote_question_text) ||
+    text(root.question);
   const title = text(root.vote_title);
 
   // Bill linkage, as upstream: the document when it's a bill; otherwise the
@@ -418,7 +496,7 @@ export async function parseSenateRollCall(
     year,
     rollCallNumber,
     votedAt: etWallClock(year, month, Number(m[2]), hour, Number(m[5])),
-    category: voteCategory(question),
+    category: senateVoteCategory(question),
     billId,
     voters,
   };
@@ -431,7 +509,7 @@ export async function fetchSenateRollCall(
   const { congress, session } = congressForYear(year);
   const padded = String(voteNumber).padStart(5, "0");
   const url = `https://www.senate.gov/legislative/LIS/roll_call_votes/vote${congress}${session}/vote_${congress}_${session}_${padded}.xml`;
-  const res = await withRetry(() => http.get<string>(url));
+  const res = await get(url);
   return parseSenateRollCall(res.data);
 }
 
@@ -450,10 +528,8 @@ export async function parseSenateMemberRoster(
 }
 
 export async function fetchSenateMemberRoster(): Promise<Map<string, string>> {
-  const res = await withRetry(() =>
-    http.get<string>(
-      "https://www.senate.gov/legislative/LIS_MEMBER/cvc_member_data.xml",
-    ),
+  const res = await get(
+    "https://www.senate.gov/legislative/LIS_MEMBER/cvc_member_data.xml",
   );
   return parseSenateMemberRoster(res.data);
 }

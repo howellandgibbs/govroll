@@ -21,23 +21,25 @@ import { isTransientCongressError } from "@/lib/congress-api";
  *
  * Source: the chambers' own roll-call XML (clerk.house.gov, senate.gov) via
  * official-votes.ts — GovTrack's API went behind a Cloudflare challenge in
- * Oct 2026.
+ * Oct 2026. senate.gov's WAF has refused server-side clients since
+ * 2026-10-23; the Senate then comes from Voteview (voteview.ts).
  *
  * Idempotent: fetchVotesFunction upserts by (representativeId,
  * billId, rollCallNumber), so overlapping windows are fine.
  *
- * Resumable: fetchVotesFunction reads/advances an IngestCursor row and walks
- * from min(saved cursor, now - 2d). The default path re-walks the last ~2
- * days (self-heal for a missed run); a cursor stalled by a longer outage is
- * honored so no roll call in the gap is lost. Pass `?since=YYYY-MM-DD` to
- * force a deep backfill from an explicit date — it advances the cursor
- * per-day, so a backfill bigger than one run's budget resumes on the next.
+ * Resumable: fetchVotesFunction keeps one IngestCursor row per chamber and
+ * walks each from min(saved cursor, now - 2d). The default path re-walks the
+ * last ~2 days (self-heal for a missed run); a cursor stalled by a longer
+ * outage is honored so no roll call in the gap is lost. Pass
+ * `?since=YYYY-MM-DD` to force a deep backfill from an explicit date — it
+ * advances the cursors per-day, so a backfill bigger than one run's budget
+ * resumes on the next.
  *
  * Transient upstream failures (timeouts, dropped connections, 429/5xx) are
- * non-paging, same as the Congress.gov crons: the run stops with the cursor
- * where it was and the next hourly run re-walks the day. These used to email
- * an alert once or twice a day. A sustained outage still pages — the
- * ingest-health watchdog alerts when the fetch-votes cursor stops advancing.
+ * non-paging, same as the Congress.gov crons: the chamber stops with its
+ * cursor where it was and the next hourly run re-walks the day. These used to
+ * email an alert once or twice a day. A sustained outage still pages — the
+ * ingest-health watchdog alerts when either chamber's cursor stops advancing.
  */
 
 export const maxDuration = 60;
@@ -90,8 +92,8 @@ export async function GET(request: Request) {
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     if (isTransientCongressError(error)) {
-      // The classifier is generic over axios errors, so it covers the Clerk
-      // and senate.gov fetches too.
+      // The classifier is generic over axios errors, so it covers the Clerk,
+      // senate.gov and Voteview fetches too.
       console.warn(
         `[fetch-votes cron] stopped on a transient upstream error (${msg}); cursor preserved, resuming next run`,
       );
