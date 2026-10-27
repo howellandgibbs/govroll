@@ -1,4 +1,5 @@
 import "dotenv/config";
+import axios from "axios";
 import {
   fetchHouseRollCall,
   fetchSenateMemberRoster,
@@ -6,35 +7,52 @@ import {
   fetchSenateVoteMenu,
   type ParsedRollCall,
   type SenateMenuEntry,
+  type VoteChamber,
 } from "../lib/official-votes";
+import {
+  fetchVoteviewSenateMenu,
+  fetchVoteviewSenateRollCall,
+  type VoteviewMenuEntry,
+} from "../lib/voteview";
+import { isTransientCongressError } from "../lib/congress-api";
 import { fetchSpecificBills } from "./fetch-bills";
 import { createStandalonePrisma } from "../lib/prisma-standalone";
 import dayjs, { type Dayjs } from "dayjs";
 
 const prisma = createStandalonePrisma();
 
-// Resumable-ingest plumbing. The cursor records the high-water mark of
-// contiguous day-by-day ingestion so an outage longer than OVERLAP_DAYS
+// Resumable-ingest plumbing. Each chamber's cursor records the high-water mark
+// of its contiguous day-by-day ingestion so an outage longer than OVERLAP_DAYS
 // doesn't silently drop every roll call in the gap (a fixed now-2d lookback
-// did exactly that). Mirrors the fetch-bills cursor pattern.
-const CURSOR_KEY = "fetch-votes";
+// did exactly that). Mirrors the fetch-bills cursor pattern. The chambers have
+// separate sources, so they get separate cursors: with one shared cursor,
+// senate.gov refusing us (Oct 2026) stalled the House votes too.
+const CURSOR_KEYS: Record<VoteChamber, string> = {
+  house: "fetch-votes-house",
+  senate: "fetch-votes-senate",
+};
+// The shared cursor the chambers split from. A chamber with no row of its own
+// yet resumes from it, so the first run after the split re-walks the gap.
+const LEGACY_CURSOR_KEY = "fetch-votes";
 // Re-walk at least this many days on every run so a healthy cursor still
 // self-heals a missed cron tick; the overlap is free thanks to skipDuplicates.
+// It also covers Voteview's overnight publishing lag.
 const OVERLAP_DAYS = 2;
-// Pause between roll-call file fetches. The Clerk and senate.gov are free,
-// keyless public sites — a busy day is a few dozen files, so stay polite.
+// Pause between roll-call file fetches. The Clerk, senate.gov and Voteview
+// are free, keyless public sites — a busy day is a few dozen files, so stay
+// polite.
 const FETCH_SPACING_MS = 100;
 
 export interface FetchVotesOptions {
   /**
-   * Explicit start date (deep backfill). When set, overrides the cursor and
+   * Explicit start date (deep backfill). When set, overrides the cursors and
    * walks forward from here. The per-day cursor advance still applies, so a
    * backfill that exceeds the deadline resumes on the next run.
    */
   since?: Date;
   /**
-   * Soft wall-clock budget. The day loop stops once exceeded, leaving the
-   * cursor at the last fully-ingested day so the next invocation resumes
+   * Soft wall-clock budget. The day loop stops once exceeded, leaving each
+   * cursor at its last fully-ingested day so the next invocation resumes
    * there instead of being hard-killed mid-write.
    */
   deadlineMs?: number;
@@ -66,6 +84,19 @@ function nextDay(day: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** One chamber's roll calls for one ET day. */
+interface DayVotes {
+  rollCalls: ParsedRollCall[];
+  /** The deadline cut the day short: keep what was read, redo it next run. */
+  partial: boolean;
+}
+
+/** Reads one chamber's roll calls day by day, keeping its place across days. */
+type DayReader = (
+  day: string,
+  pastDeadline: () => boolean,
+) => Promise<DayVotes>;
+
 /** Where the House walk resumes within one session year. */
 interface HouseWalk {
   next: number;
@@ -76,17 +107,148 @@ interface HouseWalk {
 }
 
 /**
- * Walk forward day by day (ET) from the resume point to today, gathering each
- * day's roll calls from both chambers and writing them before advancing the
- * cursor past that day.
+ * House — the Clerk has no date index, only sequential roll numbers. The walk
+ * starts just past the newest roll call already stored before the start day
+ * and reads forward, holding back a roll call dated after the current day
+ * until the loop reaches it. The first roll number not yet published ends the
+ * House walk for that year.
+ */
+function houseReader(): DayReader {
+  const walks = new Map<number, HouseWalk>();
+  return async (day, pastDeadline) => {
+    const year = Number(day.slice(0, 4));
+    let walk = walks.get(year);
+    if (!walk) {
+      walk = {
+        next: (await newestStoredHouseRoll(year, day)) + 1,
+        pending: null,
+        exhausted: false,
+      };
+      walks.set(year, walk);
+    }
+    const rollCalls: ParsedRollCall[] = [];
+    while (!walk.exhausted) {
+      if (pastDeadline()) return { rollCalls, partial: true };
+      let rc = walk.pending;
+      if (!rc) {
+        rc = await fetchHouseRollCall(year, walk.next);
+        await delay(FETCH_SPACING_MS);
+      }
+      if (!rc) {
+        walk.exhausted = true;
+        break;
+      }
+      if (votedAtDate(rc.votedAt) > day) {
+        walk.pending = rc;
+        break;
+      }
+      walk.pending = null;
+      walk.next = rc.rollCallNumber + 1;
+      rollCalls.push(rc);
+    }
+    return { rollCalls, partial: false };
+  };
+}
+
+/**
+ * Senate — the session's vote menu lists every vote with its date, so a day's
+ * votes are a filter over it (menu fetched once per year).
  *
- *   Senate — the session's vote menu lists every vote with its date, so a
- *            day's votes are a filter over it (menu fetched once per year).
- *   House  — the Clerk has no date index, only sequential roll numbers. The
- *            walk starts just past the newest roll call already stored before
- *            the start day and reads forward, holding back a roll call dated
- *            after the current day until the loop reaches it. The first roll
- *            number not yet published ends the House walk for that year.
+ * Read from senate.gov while it answers, else from Voteview (voteview.ts).
+ * senate.gov's Akamai WAF has refused every server-side client since
+ * 2026-10-23, so the first senate.gov request that gets no answer moves the
+ * rest of the run to Voteview: a blocked run costs one refused request, not
+ * one per vote. An answer that won't parse still fails, so a format change
+ * gets noticed rather than papered over.
+ */
+function senateReader(): DayReader {
+  let useVoteview = false;
+  const menus = new Map<number, SenateMenuEntry[]>();
+  const voteviewMenus = new Map<number, VoteviewMenuEntry[]>();
+  let roster: Map<string, string> | null = null;
+
+  const fromSenateGov: DayReader = async (day, pastDeadline) => {
+    const year = Number(day.slice(0, 4));
+    let menu = menus.get(year);
+    if (!menu) {
+      menu = await fetchSenateVoteMenu(year);
+      menus.set(year, menu);
+    }
+    const rollCalls: ParsedRollCall[] = [];
+    for (const entry of menu
+      .filter((e) => e.date === day)
+      .sort((a, b) => a.voteNumber - b.voteNumber)) {
+      if (pastDeadline()) return { rollCalls, partial: true };
+      roster ??= await fetchSenateMemberRoster();
+      const rc = await fetchSenateRollCall(year, entry.voteNumber);
+      // senate.gov keys senators by LIS id; resolve bioguide ids through the
+      // Senate's roster of sitting senators (Voteview supplies them directly).
+      const lisToBioguide = roster;
+      rollCalls.push({
+        ...rc,
+        voters: rc.voters.map((v) => ({
+          ...v,
+          bioguideId:
+            v.bioguideId ??
+            (v.lisId ? lisToBioguide.get(v.lisId) : null) ??
+            null,
+        })),
+      });
+      await delay(FETCH_SPACING_MS);
+    }
+    return { rollCalls, partial: false };
+  };
+
+  const fromVoteview: DayReader = async (day, pastDeadline) => {
+    const year = Number(day.slice(0, 4));
+    let menu = voteviewMenus.get(year);
+    if (!menu) {
+      menu = await fetchVoteviewSenateMenu(year);
+      voteviewMenus.set(year, menu);
+    }
+    const rollCalls: ParsedRollCall[] = [];
+    // The index already names each vote's bill, and only bill-linked roll
+    // calls are stored, so nominations and the like aren't fetched at all.
+    for (const entry of menu
+      .filter((e) => e.date === day && e.billId !== null)
+      .sort((a, b) => a.voteNumber - b.voteNumber)) {
+      if (pastDeadline()) return { rollCalls, partial: true };
+      rollCalls.push(await fetchVoteviewSenateRollCall(entry));
+      await delay(FETCH_SPACING_MS);
+    }
+    return { rollCalls, partial: false };
+  };
+
+  return async (day, pastDeadline) => {
+    if (!useVoteview) {
+      try {
+        return await fromSenateGov(day, pastDeadline);
+      } catch (error) {
+        if (!axios.isAxiosError(error)) throw error;
+        useVoteview = true;
+        console.warn(
+          `[fetch-votes] senate.gov unavailable (${error.message}); reading the Senate from Voteview for the rest of this run`,
+        );
+      }
+    }
+    return fromVoteview(day, pastDeadline);
+  };
+}
+
+interface ChamberWalk {
+  chamber: VoteChamber;
+  read: DayReader;
+  /** First ET day this chamber walks. */
+  from: string;
+  failed: boolean;
+}
+
+/**
+ * Walk forward day by day (ET) to today, reading each chamber's roll calls
+ * for the day and writing them before advancing that chamber's cursor past
+ * it. The chambers share the day loop and the deadline but nothing else: one
+ * whose source fails stops there for this run, its cursor left for the next
+ * run (and the watchdog), while the other carries on.
  */
 export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
   const started = Date.now();
@@ -96,18 +258,28 @@ export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
   try {
     const now = dayjs();
     const today = etDate(now.toDate());
-    // `since` is a calendar date (UTC midnight); the cursor is an instant.
-    let day = opts.since
-      ? opts.since.toISOString().slice(0, 10)
-      : etDate((await resolveStartDate(now)).toDate());
+    const readers: [VoteChamber, DayReader][] = [
+      ["house", houseReader()],
+      ["senate", senateReader()],
+    ];
+    const walks: ChamberWalk[] = [];
+    for (const [chamber, read] of readers) {
+      walks.push({
+        chamber,
+        read,
+        // `since` is a calendar date (UTC midnight); the cursor is an instant.
+        from: opts.since
+          ? opts.since.toISOString().slice(0, 10)
+          : etDate((await resolveStartDate(chamber, now)).toDate()),
+        failed: false,
+      });
+    }
 
-    const senateMenus = new Map<number, SenateMenuEntry[]>();
-    const houseWalks = new Map<number, HouseWalk>();
-    let senateRoster: Map<string, string> | null = null;
-
-    while (day <= today) {
+    const errors: unknown[] = [];
+    let day = walks.reduce((min, w) => (w.from < min ? w.from : min), today);
+    walk: while (day <= today && walks.some((w) => !w.failed)) {
       // Stop between days (never mid-write) once the budget is spent. The
-      // cursor is already at the last completed day, so the next run resumes.
+      // cursors are already at the last completed day, so the next run resumes.
       if (pastDeadline()) {
         console.log(
           `[fetch-votes] deadline reached at ${day}; resuming next run`,
@@ -115,91 +287,56 @@ export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
         break;
       }
 
-      const year = Number(day.slice(0, 4));
-      const rollCalls: ParsedRollCall[] = [];
-      let abandonedDay = false;
+      for (const w of walks) {
+        if (w.failed || day < w.from) continue;
+        try {
+          const { rollCalls, partial } = await w.read(day, pastDeadline);
+          // Write whatever was gathered — rows are idempotent, so a partial
+          // day is safe to keep — but only advance the cursor past a complete
+          // day.
+          await persistRollCalls(rollCalls);
+          console.log(
+            `[fetch-votes] ${day} ${w.chamber}: ${rollCalls.length} roll calls` +
+              (partial
+                ? " (partial — deadline reached, redoing next run)"
+                : ""),
+          );
+          if (partial) break walk;
 
-      // ── Senate ──
-      let menu = senateMenus.get(year);
-      if (!menu) {
-        menu = await fetchSenateVoteMenu(year);
-        senateMenus.set(year, menu);
+          // Advance the cursor only after the day's writes succeed. If a later
+          // day throws, the cursor stays at the last fully-ingested day rather
+          // than jumping to now and stranding the gap. Noon UTC is the same
+          // calendar date in ET, so etDate() reads it back as the next day to
+          // walk. Today's run stores `now`, so the next run re-walks today for
+          // roll calls cast later this evening.
+          const advanced =
+            day === today
+              ? now.toDate()
+              : new Date(`${nextDay(day)}T12:00:00Z`);
+          await prisma.ingestCursor.upsert({
+            where: { key: CURSOR_KEYS[w.chamber] },
+            update: { cursor: advanced },
+            create: { key: CURSOR_KEYS[w.chamber], cursor: advanced },
+          });
+        } catch (error) {
+          w.failed = true;
+          errors.push(error);
+          console.error(
+            `[fetch-votes] ${w.chamber} stopped at ${day}; resuming there next run:`,
+            error instanceof Error ? error.message : error,
+          );
+        }
       }
-      const senateToday = menu
-        .filter((e) => e.date === day)
-        .sort((a, b) => a.voteNumber - b.voteNumber);
-      for (const entry of senateToday) {
-        if (pastDeadline()) {
-          abandonedDay = true;
-          break;
-        }
-        senateRoster ??= await fetchSenateMemberRoster();
-        rollCalls.push(await fetchSenateRollCall(year, entry.voteNumber));
-        await delay(FETCH_SPACING_MS);
-      }
-
-      // ── House ──
-      let walk = houseWalks.get(year);
-      if (!walk) {
-        walk = {
-          next: (await newestStoredHouseRoll(year, day)) + 1,
-          pending: null,
-          exhausted: false,
-        };
-        houseWalks.set(year, walk);
-      }
-      while (!abandonedDay && !walk.exhausted) {
-        if (pastDeadline()) {
-          abandonedDay = true;
-          break;
-        }
-        let rc = walk.pending;
-        if (!rc) {
-          rc = await fetchHouseRollCall(year, walk.next);
-          await delay(FETCH_SPACING_MS);
-        }
-        if (!rc) {
-          walk.exhausted = true;
-          break;
-        }
-        if (votedAtDate(rc.votedAt) > day) {
-          walk.pending = rc;
-          break;
-        }
-        walk.pending = null;
-        walk.next = rc.rollCallNumber + 1;
-        rollCalls.push(rc);
-      }
-
-      // Write whatever was gathered — rows are idempotent, so a partial day
-      // is safe to keep — but only advance the cursor past a complete day.
-      await persistRollCalls(rollCalls, senateRoster);
-      console.log(
-        `[fetch-votes] ${day}: ${rollCalls.length} roll calls` +
-          (abandonedDay
-            ? " (partial — deadline reached, redoing next run)"
-            : ""),
-      );
-      if (abandonedDay) break;
-
-      // Advance the cursor only after the day's writes succeed. If a later
-      // day throws, the cursor stays at the last fully-ingested day rather
-      // than jumping to now and stranding the gap. Errors propagate so the
-      // caller (cron route) surfaces a 500 instead of a false success.
-      // Noon UTC is the same calendar date in ET, so etDate() reads it back as
-      // the next day to walk. Today's run stores `now`, so the next run
-      // re-walks today for roll calls cast later this evening.
-      const advanced =
-        day === today ? now.toDate() : new Date(`${nextDay(day)}T12:00:00Z`);
-      await prisma.ingestCursor.upsert({
-        where: { key: CURSOR_KEY },
-        update: { cursor: advanced },
-        create: { key: CURSOR_KEY, cursor: advanced },
-      });
 
       day = nextDay(day);
     }
 
+    // Errors propagate so the caller (cron route) surfaces a 500 instead of a
+    // false success. A hard failure outranks a transient one, so a chamber
+    // that is genuinely broken still pages while the other merely backs off.
+    if (errors.length > 0) {
+      throw errors.find((e) => !isTransientCongressError(e)) ?? errors[0];
+    }
     console.log("Votes fetched and stored successfully.");
   } finally {
     await prisma.$disconnect();
@@ -207,19 +344,26 @@ export async function fetchVotesFunction(opts: FetchVotesOptions = {}) {
 }
 
 /**
- * Where to start the day-by-day walk when no explicit `since` (manual/admin
- * deep backfill) was given.
+ * Where a chamber's day-by-day walk starts when no explicit `since` (manual/
+ * admin deep backfill) was given.
  *
  *   - Walk from min(saved cursor, now - OVERLAP_DAYS): a healthy cursor still
  *     re-walks the overlap window (self-heal), while a cursor stalled by an
  *     outage is honored so the whole gap is recovered.
- *   - No cursor yet (first run): just the overlap window.
+ *   - No cursor yet: the pre-split shared cursor if there is one, else just
+ *     the overlap window (first run).
  */
-async function resolveStartDate(now: Dayjs): Promise<Dayjs> {
+async function resolveStartDate(
+  chamber: VoteChamber,
+  now: Dayjs,
+): Promise<Dayjs> {
   const overlapStart = now.subtract(OVERLAP_DAYS, "day");
-  const cursorRow = await prisma.ingestCursor.findUnique({
-    where: { key: CURSOR_KEY },
+  const rows = await prisma.ingestCursor.findMany({
+    where: { key: { in: [CURSOR_KEYS[chamber], LEGACY_CURSOR_KEY] } },
   });
+  const cursorRow =
+    rows.find((r) => r.key === CURSOR_KEYS[chamber]) ??
+    rows.find((r) => r.key === LEGACY_CURSOR_KEY);
   if (cursorRow && dayjs(cursorRow.cursor).isBefore(overlapStart)) {
     return dayjs(cursorRow.cursor);
   }
@@ -268,10 +412,7 @@ async function newestStoredHouseRoll(
  *    (representativeId, billId, rollCallNumber) tuple is immutable once the
  *    roll call is recorded, so re-runs are idempotent without an UPSERT.
  */
-async function persistRollCalls(
-  rollCalls: ParsedRollCall[],
-  senateRoster: Map<string, string> | null,
-) {
+async function persistRollCalls(rollCalls: ParsedRollCall[]) {
   const linked = rollCalls.filter(
     (rc): rc is ParsedRollCall & { billId: string } => rc.billId !== null,
   );
@@ -302,14 +443,14 @@ async function persistRollCalls(
   const billRowId = new Map(bills.map((b) => [b.billId, b.id]));
 
   // ── Representatives ──
-  // House voters carry bioguide ids. Senate voters carry LIS ids, resolved
-  // through the Senate's roster of sitting senators; a senator who has since
+  // Voters carry bioguide ids where the source could give one (for senate.gov,
+  // via the Senate's roster of sitting senators). A senator who has since
   // left office falls back to last name + state among our senators.
   const reps = await prisma.representative.findMany({
     where: {
       OR: [
         { chamber: "senator" },
-        { bioguideId: { in: houseBioguides(linked) } },
+        { bioguideId: { in: voterBioguides(linked) } },
       ],
     },
     select: {
@@ -341,10 +482,8 @@ async function persistRollCalls(
     if (!billId) continue;
     for (const v of rc.voters) {
       if (!v.vote) continue;
-      const bioguide =
-        v.bioguideId ?? (v.lisId ? senateRoster?.get(v.lisId) : undefined);
       const representativeId =
-        (bioguide ? repIdByBioguide.get(bioguide) : undefined) ??
+        (v.bioguideId ? repIdByBioguide.get(v.bioguideId) : undefined) ??
         (rc.chamber === "senate"
           ? senatorIdByNameState.get(`${v.lastName.toLowerCase()}|${v.state}`)
           : undefined);
@@ -372,7 +511,7 @@ async function persistRollCalls(
   });
 }
 
-function houseBioguides(rollCalls: ParsedRollCall[]): string[] {
+function voterBioguides(rollCalls: ParsedRollCall[]): string[] {
   const ids = new Set<string>();
   for (const rc of rollCalls) {
     for (const v of rc.voters) if (v.bioguideId) ids.add(v.bioguideId);

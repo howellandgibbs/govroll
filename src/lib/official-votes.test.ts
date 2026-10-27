@@ -12,6 +12,7 @@ import {
   parseHouseRollCall,
   parseSenateRollCall,
   parseSenateVoteMenu,
+  senateVoteCategory,
   voteCategory,
 } from "./official-votes";
 
@@ -37,6 +38,39 @@ describe("voteCategory", () => {
     ["", "unknown"],
   ])("%j → %s", (question, category) => {
     expect(voteCategory(question)).toBe(category);
+  });
+});
+
+describe("senateVoteCategory", () => {
+  // Upstream categorizes a Senate vote on its full question text, normalized
+  // first; these are the live files' vote_question_text forms.
+  it.each([
+    [
+      "On the Motion (Motion to Concur in the House Amendment to S. 2403)",
+      "passage",
+    ],
+    [
+      "On the Motion (Motion to Recede from the Senate Amendment to H.R. 1 and Concur with Further Amendment)",
+      "passage",
+    ],
+    [
+      "On the Motion (Motion to Waive All Applicable Budgetary Discipline Re: Kennedy Amdt. No. 5414)",
+      "procedural",
+    ],
+    ["On the Motion to Proceed S. 2", "procedural"],
+    ["On the Motion to Table", "procedural"],
+    ["On Cloture on the Motion to Proceed S. 2", "cloture"],
+    ["On the Cloture Motion S. 5", "cloture"],
+    ["On the Joint Resolution S.J.Res. 123", "passage"],
+    ["On the Concurrent Resolution S.Con.Res. 33", "passage"],
+    ["On Passage of the Bill S. 2", "passage"],
+    [
+      "On the Amendment S.Amdt. 14 to S.Amdt. 8 to S. 5 (No short title on file)",
+      "amendment",
+    ],
+    ["On the Nomination PN1129", "nomination"],
+  ])("%j → %s", (question, category) => {
+    expect(senateVoteCategory(question)).toBe(category);
   });
 });
 
@@ -180,6 +214,18 @@ describe("parseSenateRollCall", () => {
       ),
     );
     expect(rc.billId).toBe("senate_bill-4668-119");
+  });
+
+  it("categorizes on the full question text, not the short <question>", async () => {
+    const rc = await parseSenateRollCall(
+      vote(
+        "<document_type>S.</document_type><document_number>2403</document_number>",
+      ).replace(
+        /<question>[\s\S]*?<\/question>/,
+        "<question>On the Motion</question><vote_question_text>On the Motion (Motion to Concur in the House Amendment to S. 2403)</vote_question_text>",
+      ),
+    );
+    expect(rc.category).toBe("passage");
   });
 
   it("leaves nominations unlinked", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import dayjs from "dayjs";
 import { GET } from "@/app/api/cron/fetch-votes/route";
+import { congressForYear } from "@/lib/official-votes";
 import { server } from "../msw-server";
 import { getTestPrisma } from "../db";
 import { seedBill, seedRepresentative } from "../fixtures";
@@ -10,8 +11,9 @@ import { invokeCron } from "../invoke";
 /**
  * fetch-votes reads the chambers' own XML: the House Clerk's per-roll-call
  * files and senate.gov's per-session vote menu + per-vote files + member
- * roster. These helpers render minimal versions of each format (shapes taken
- * from the live files) and serve them through MSW.
+ * roster — or, when senate.gov refuses, Voteview's roll-call index CSV and
+ * per-vote JSON. These helpers render minimal versions of each format (shapes
+ * taken from the live files) and serve them through MSW.
  */
 
 const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
@@ -212,20 +214,113 @@ function mockSenate(
   );
 }
 
+type VoteviewVote = {
+  /** The Senate's vote number in its session (Voteview's clerk_rollnumber). */
+  n: number;
+  /** Voteview's own per-Congress sequence number. */
+  seq: number;
+  day: string;
+  billNumber: string;
+  questionText: string;
+  members: { bioguide: string; last: string; state: string; cast: string }[];
+};
+
+function voteviewIndexCsv(votes: VoteviewVote[]): string {
+  const rows = votes.map((v) => {
+    const { congress, session } = congressForYear(parts(v.day).y);
+    return `${congress},Senate,${v.seq},${v.day},${session},${v.n},1/2,1,0,${v.billNumber},Agreed to,"A bill, with commas",On the Motion,`;
+  });
+  return [
+    "congress,chamber,rollnumber,date,session,clerk_rollnumber,majority_requirement,yea_count,nay_count,bill_number,vote_result,vote_desc,vote_question,dtl_desc",
+    ...rows,
+    "",
+  ].join("\n");
+}
+
+function voteviewRollCallJson(v: VoteviewVote) {
+  const { congress } = congressForYear(parts(v.day).y);
+  return {
+    apitype: "Web 2019-10",
+    rollcalls: [
+      {
+        id: `RS${congress}${String(v.seq).padStart(4, "0")}`,
+        chamber: "Senate",
+        congress,
+        rollnumber: v.seq,
+        clerk_rollnumber: v.n,
+        date: v.day,
+        bill_number: v.billNumber,
+        question: "On the Motion",
+        vote_question_text: v.questionText,
+        vote_title: "",
+        votes: v.members.map((m) => ({
+          bioguide_id: m.bioguide,
+          lis_member_id: "S999",
+          last_name: m.last,
+          state_abbrev: m.state,
+          cast_str: m.cast,
+          vote: m.cast,
+        })),
+      },
+    ],
+  };
+}
+
+/** Serve Voteview's Senate index and per-vote JSON. Returns the ids fetched. */
+function mockVoteview(votes: VoteviewVote[]): string[] {
+  const fetched: string[] = [];
+  server.use(
+    http.get("https://voteview.com/static/data/out/rollcalls/:file", () =>
+      HttpResponse.text(voteviewIndexCsv(votes)),
+    ),
+    http.get("https://voteview.com/api/download", ({ request }) => {
+      const id = new URL(request.url).searchParams.get("rollcall_id") ?? "";
+      fetched.push(id);
+      const v = votes.find((x) => id.endsWith(String(x.seq).padStart(4, "0")));
+      return HttpResponse.json(
+        v
+          ? voteviewRollCallJson(v)
+          : { errormessage: "Invalid Rollcall ID specified." },
+      );
+    }),
+  );
+  return fetched;
+}
+
+/** senate.gov's answer to every server-side client since 2026-10-23. Returns
+ *  a counter of the requests it refused. */
+function refuseSenateGov(): { count: number } {
+  const refused = { count: 0 };
+  server.use(
+    http.get("https://www.senate.gov/*", () => {
+      refused.count++;
+      return new HttpResponse("Access Denied", { status: 403 });
+    }),
+  );
+  return refused;
+}
+
+async function cursorKeys(): Promise<string[]> {
+  const rows = await getTestPrisma().ingestCursor.findMany({
+    orderBy: { key: "asc" },
+  });
+  return rows.map((r) => r.key);
+}
+
 describe("GET /api/cron/fetch-votes", () => {
   it("rejects missing auth", async () => {
     const res = await invokeCron(GET, { auth: null });
     expect(res.status).toBe(401);
   });
 
-  it("returns ok with no votes published and advances the cursor", async () => {
+  it("returns ok with no votes published and advances both chambers' cursors", async () => {
     const res = await invokeCron(GET);
     expect(res.status).toBe(200);
     expect(await getTestPrisma().representativeVote.count()).toBe(0);
-    const cursor = await getTestPrisma().ingestCursor.findUnique({
-      where: { key: "fetch-votes" },
-    });
-    expect(cursor).not.toBeNull();
+    expect(await cursorKeys()).toEqual([
+      "fetch-votes-house",
+      "fetch-votes-senate",
+    ]);
   });
 
   it("stores House votes for known members on bill-linked roll calls", async () => {
@@ -353,6 +448,105 @@ describe("GET /api/cron/fetch-votes", () => {
     expect(new Set(votes.map((v) => v.chamber))).toEqual(new Set(["senate"]));
   });
 
+  it("reads the Senate from Voteview when senate.gov refuses, without fetching non-bill votes", async () => {
+    const day = etDay(1);
+    const { congress } = congressForYear(parts(day).y);
+    const schumer = await seedRepresentative({
+      bioguideId: "S000148",
+      lastName: "Schumer",
+      state: "NY",
+      chamber: "senator",
+    });
+    const bill = await seedBill({
+      billId: `house_bill-6644-${congress}`,
+      billType: "house_bill",
+    });
+    const refused = refuseSenateGov();
+    const member = {
+      bioguide: schumer.bioguideId,
+      last: "Schumer",
+      state: "NY",
+      cast: "Nay",
+    };
+    const fetched = mockVoteview([
+      {
+        n: 182,
+        seq: 524,
+        day,
+        billNumber: "HR6644",
+        questionText:
+          "On the Motion (Motion to Concur in the House Amendment to the Senate Amendment to H.R. 6644)",
+        members: [member],
+      },
+      {
+        n: 183,
+        seq: 525,
+        day,
+        billNumber: "PN1129",
+        questionText: "On the Nomination PN1129",
+        members: [member],
+      },
+    ]);
+
+    const res = await invokeCron(GET);
+    expect(res.status).toBe(200);
+
+    // One refused request moves the run over: no retries, no per-vote tries.
+    expect(refused.count).toBe(1);
+    // The index already says the nomination has no bill, so it isn't fetched.
+    expect(fetched).toEqual([`RS${congress}0524`]);
+    const votes = await getTestPrisma().representativeVote.findMany();
+    expect(votes).toHaveLength(1);
+    expect(votes[0]).toMatchObject({
+      representativeId: schumer.id,
+      billId: bill.id,
+      vote: "Nay",
+      rollCallNumber: 182,
+      chamber: "senate",
+      category: "passage",
+    });
+    // Voteview has the date but not the time of day.
+    expect(votes[0].votedAt?.toISOString()).toBe(`${day}T00:00:00.000Z`);
+    expect(await cursorKeys()).toEqual([
+      "fetch-votes-house",
+      "fetch-votes-senate",
+    ]);
+  });
+
+  it("keeps ingesting the House while the Senate is unreachable at both sources", async () => {
+    const day = etDay(1);
+    const rep = await seedRepresentative({
+      bioguideId: "H000321",
+      chamber: "representative",
+    });
+    await seedBill({ billId: "house_bill-321-119" });
+    mockHouse([
+      {
+        roll: 1,
+        day,
+        legisNum: "H R 321",
+        question: "On Passage",
+        voters: [{ bioguideId: rep.bioguideId, vote: "Yea" }],
+      },
+    ]);
+    refuseSenateGov();
+    server.use(
+      http.get(
+        "https://voteview.com/*",
+        () => new HttpResponse(null, { status: 403 }),
+      ),
+    );
+
+    const res = await invokeCron(GET);
+    // A block at both sources is sustained, not backpressure: the run fails
+    // and alerts (as GovTrack's bot challenge should have)…
+    expect(res.status).toBe(500);
+    expect((await res.json()).ok).toBe(false);
+    // …but only the Senate stops. The House votes land and its cursor moves.
+    expect(await getTestPrisma().representativeVote.count()).toBe(1);
+    expect(await cursorKeys()).toEqual(["fetch-votes-house"]);
+  });
+
   it("creates a bill it hasn't ingested yet through fetch-bills, then stores the votes", async () => {
     const day = etDay(1);
     const rep = await seedRepresentative({
@@ -474,10 +668,11 @@ describe("GET /api/cron/fetch-votes", () => {
     }
   });
 
-  it("resumes from a stale IngestCursor and advances it (outage recovery)", async () => {
+  it("resumes from the stale pre-split cursor and advances each chamber's (outage recovery)", async () => {
     const db = getTestPrisma();
-    // The cursor is 5 days stale, beyond the 2-day self-heal overlap. A
-    // Senate vote cast 4 days ago must still be picked up.
+    // The shared cursor the chambers split from is 5 days stale, beyond the
+    // 2-day self-heal overlap. A Senate vote cast 4 days ago must still be
+    // picked up.
     await db.ingestCursor.create({
       data: {
         key: "fetch-votes",
@@ -509,17 +704,18 @@ describe("GET /api/cron/fetch-votes", () => {
     expect(res.status).toBe(200);
     expect(await db.representativeVote.count()).toBe(1);
 
-    const row = await db.ingestCursor.findUnique({
-      where: { key: "fetch-votes" },
-    });
-    expect(row!.cursor.getTime()).toBeGreaterThan(
-      dayjs().subtract(1, "day").valueOf(),
-    );
+    for (const key of ["fetch-votes-house", "fetch-votes-senate"]) {
+      const row = await db.ingestCursor.findUnique({ where: { key } });
+      expect(row!.cursor.getTime()).toBeGreaterThan(
+        dayjs().subtract(1, "day").valueOf(),
+      );
+    }
   });
 
-  it("stops quietly on a transient upstream outage, leaving the cursor for the watchdog", async () => {
-    // 5xx / timeouts are non-paging: 200 with upstreamPaused, and the cursor
-    // does NOT advance, so ingest-health pages if it stays stuck for 8h.
+  it("stops quietly on a transient upstream outage, leaving that chamber's cursor for the watchdog", async () => {
+    // 5xx / timeouts are non-paging: 200 with upstreamPaused, and the House
+    // cursor does NOT advance, so ingest-health pages if it stays stuck for
+    // 8h. The Senate, a different source, carries on.
     server.use(
       http.get(
         "https://clerk.house.gov/evs/:year/:file",
@@ -532,19 +728,15 @@ describe("GET /api/cron/fetch-votes", () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.upstreamPaused).toBe(true);
-    expect(
-      await getTestPrisma().ingestCursor.findUnique({
-        where: { key: "fetch-votes" },
-      }),
-    ).toBeNull();
+    expect(await cursorKeys()).toEqual(["fetch-votes-senate"]);
   });
 
   it("still returns 500 on a non-transient failure (systemic failure is not laundered into ok)", async () => {
-    // A 403 is what GovTrack's bot challenge looked like — a sustained block,
-    // not backpressure — so it must fail the run and alert.
+    // A 403 from the Clerk (no fallback source) is a sustained block, not
+    // backpressure, so it must fail the run and alert.
     server.use(
       http.get(
-        "https://www.senate.gov/legislative/LIS/roll_call_lists/:file",
+        "https://clerk.house.gov/evs/:year/:file",
         () => new HttpResponse(null, { status: 403 }),
       ),
     );

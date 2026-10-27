@@ -27,6 +27,15 @@ export const defaultHandlers = [
     "https://www.senate.gov/legislative/LIS_MEMBER/cvc_member_data.xml",
     () => HttpResponse.text("<senators></senators>"),
   ),
+  // Voteview (the Senate fallback): an index with no votes in it.
+  http.get("https://voteview.com/static/data/out/rollcalls/*", () =>
+    HttpResponse.text(
+      "congress,chamber,rollnumber,date,session,clerk_rollnumber,bill_number\n",
+    ),
+  ),
+  http.get("https://voteview.com/api/download", () =>
+    HttpResponse.json({ errormessage: "Invalid Rollcall ID specified." }),
+  ),
 
   // Congress.gov
   http.get("https://api.congress.gov/v3/*", () =>

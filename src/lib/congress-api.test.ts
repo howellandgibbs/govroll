@@ -10,6 +10,7 @@ import {
   fetchOfficialBillTitle,
   isQuotaError,
   isTransientCongressError,
+  withRetry,
 } from "./congress-api";
 
 // A 429 with a long Retry-After makes withRetry bail immediately (the server
@@ -391,6 +392,41 @@ describe("isTransientCongressError", () => {
     expect(isTransientCongressError(null)).toBe(false);
     expect(isTransientCongressError("nope")).toBe(false);
     expect(isTransientCongressError(undefined)).toBe(false);
+  });
+});
+
+describe("withRetry", () => {
+  const refused = () => {
+    const err = new AxiosError("refused", "ERR_BAD_REQUEST");
+    err.response = {
+      status: 403,
+      statusText: "",
+      data: null,
+      headers: {},
+      config: {} as never,
+    };
+    return err;
+  };
+
+  it("throws at once when shouldRetry rejects the error", async () => {
+    // A WAF 403 is an answer: asking again just repeats it.
+    let calls = 0;
+    const fn = () => {
+      calls++;
+      return Promise.reject(refused());
+    };
+    await expect(withRetry(fn, 2, 1, isTransientCongressError)).rejects.toThrow(
+      "refused",
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("retries everything by default", async () => {
+    let calls = 0;
+    const fn = () =>
+      ++calls < 3 ? Promise.reject(refused()) : Promise.resolve("ok");
+    await expect(withRetry(fn, 2, 1)).resolves.toBe("ok");
+    expect(calls).toBe(3);
   });
 });
 

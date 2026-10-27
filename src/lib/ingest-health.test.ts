@@ -10,7 +10,11 @@ describe("evaluateIngestHealth", () => {
       now: NOW,
       cursors: [
         { key: "fetch-bills", updatedAt: hoursAgo(2), maxStaleHours: 12 },
-        { key: "fetch-votes", updatedAt: hoursAgo(0.5), maxStaleHours: 8 },
+        {
+          key: "fetch-votes-house",
+          updatedAt: hoursAgo(0.5),
+          maxStaleHours: 8,
+        },
       ],
       backfills: [
         {
@@ -54,7 +58,9 @@ describe("evaluateIngestHealth", () => {
   it("flags a missing cursor row as never-run", () => {
     const breaches = evaluateIngestHealth({
       now: NOW,
-      cursors: [{ key: "fetch-votes", updatedAt: null, maxStaleHours: 8 }],
+      cursors: [
+        { key: "fetch-votes-house", updatedAt: null, maxStaleHours: 8 },
+      ],
       backfills: [],
     });
     expect(breaches).toHaveLength(1);
@@ -119,7 +125,7 @@ describe("evaluateIngestHealth", () => {
       now: NOW,
       cursors: [
         { key: "fetch-bills", updatedAt: hoursAgo(20), maxStaleHours: 12 },
-        { key: "fetch-votes", updatedAt: hoursAgo(1), maxStaleHours: 8 },
+        { key: "fetch-votes-house", updatedAt: hoursAgo(1), maxStaleHours: 8 },
       ],
       backfills: [
         {
