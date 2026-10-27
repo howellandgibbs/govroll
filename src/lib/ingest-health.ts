@@ -41,9 +41,11 @@
 export const CURSOR_STALE_HOURS: Record<string, number> = {
   // Runs every 3h. 12h ≈ four missed cycles.
   "fetch-bills": 12,
-  // Runs every 30m, but GitHub drops high-frequency runs more often; 8h is
-  // still 16 missed cycles — comfortably a real stall, not a hiccup.
-  "fetch-votes": 8,
+  // fetch-votes runs hourly with one cursor per chamber, so an outage at one
+  // chamber's source pages for that chamber alone. 8h ≈ eight missed cycles —
+  // comfortably a real stall, not a dropped GitHub run.
+  "fetch-votes-house": 8,
+  "fetch-votes-senate": 8,
 };
 
 /** Hours a rotating backfill's newest progress stamp may lag before we treat

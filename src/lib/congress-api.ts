@@ -89,12 +89,14 @@ const MAX_RETRY_DELAY_MS = 8_000;
  * Retry wrapper with exponential backoff for transient API failures. Honors a
  * server-sent Retry-After on 429s (capped at MAX_RETRY_DELAY_MS; bails when the
  * server asks for longer). Used by cron pipeline calls — not user-facing
- * requests.
+ * requests. `shouldRetry` narrows what gets retried (default: everything);
+ * an error it rejects is thrown at once.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
   retries = 2,
   delayMs = 1000,
+  shouldRetry: (error: unknown) => boolean = () => true,
 ): Promise<T> {
   for (let i = 0; i <= retries; i++) {
     try {
@@ -104,7 +106,7 @@ export async function withRetry<T>(
       // is already aborted, every retry would just throw again after eating
       // delayMs of wall clock. Bail immediately.
       if (axios.isCancel(e)) throw e;
-      if (i === retries) throw e;
+      if (i === retries || !shouldRetry(e)) throw e;
 
       // On a 429, prefer the server's Retry-After. If it's longer than we're
       // willing to hold the function open, stop retrying now and let the

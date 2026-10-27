@@ -11,8 +11,11 @@ async function seedFreshCursors() {
   await db.ingestCursor.create({
     data: { key: "fetch-bills", cursor: new Date() },
   });
-  await db.ingestCursor.create({
-    data: { key: "fetch-votes", cursor: new Date() },
+  await db.ingestCursor.createMany({
+    data: [
+      { key: "fetch-votes-house", cursor: new Date() },
+      { key: "fetch-votes-senate", cursor: new Date() },
+    ],
   });
 }
 
@@ -34,16 +37,19 @@ describe("GET /api/cron/ingest-health", () => {
   });
 
   it("flags a missing cursor as never-run", async () => {
-    // Only seed fetch-bills; fetch-votes has no row at all.
-    await getTestPrisma().ingestCursor.create({
-      data: { key: "fetch-bills", cursor: new Date() },
+    // fetch-votes-senate has no row at all.
+    await getTestPrisma().ingestCursor.createMany({
+      data: [
+        { key: "fetch-bills", cursor: new Date() },
+        { key: "fetch-votes-house", cursor: new Date() },
+      ],
     });
 
     const res = await invokeCron(GET);
     const body = await res.json();
     expect(body.healthy).toBe(false);
     expect(body.breaches).toHaveLength(1);
-    expect(body.breaches[0].pipeline).toBe("fetch-votes");
+    expect(body.breaches[0].pipeline).toBe("fetch-votes-senate");
     expect(body.breaches[0].detail).toContain("never completed a run");
   });
 
