@@ -33,11 +33,17 @@ export const AI_TRAINING_CRAWLERS = [
   "Ai2Bot-Dolma",
   "Timpibot",
   "PanguBot",
+  // ElevenLabs model training. Its sibling ElevenlabsBot (pages customers add
+  // to their agents' knowledge bases) stays allowed. ~5.6k reader-page
+  // requests in 5h on 2026-11-08, from rotating proxy IPs.
+  "ElevenlabsCrawler",
 ];
 
 /**
  * Commercial SEO-tool crawlers. They send no readers, and were the heaviest
  * identified bot traffic (SemrushBot alone ~720 requests/day in Sep 2026).
+ * SERankingBacklinksBot is also denied by the firewall rule above: it swept
+ * ~13.6k bill pages in a day (2026-11-08) and pushed Active CPU near the cap.
  */
 export const SEO_TOOL_CRAWLERS = [
   "SemrushBot",
@@ -47,4 +53,5 @@ export const SEO_TOOL_CRAWLERS = [
   "DotBot",
   "DataForSeoBot",
   "BLEXBot",
+  "SERankingBacklinksBot",
 ];
