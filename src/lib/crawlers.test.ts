@@ -41,6 +41,7 @@ describe("robots.txt crawler policy", () => {
     "Perplexity-User",
     "Claude-SearchBot",
     "Claude-User",
+    "ElevenlabsBot",
     "facebookexternalhit",
   ])("keeps %s allowed (search engines and AI search stay in)", (ua) => {
     expect(blockedEverywhere().map((b) => b.toLowerCase())).not.toContain(
