@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Build the production image and deploy it to Google Cloud Run.
 #
+# Merges to main deploy themselves through .github/workflows/deploy.yml once
+# CI passes; this script is the manual fallback. Keep the two sets of
+# `gcloud run deploy` flags in sync, and never add --ingress to either (the
+# spend kill switch stops the site through ingress).
+#
 # Usage (from the repo root, gcloud signed in, Docker running):
 #   GCP_PROJECT=<project-id> scripts/deploy-cloud-run.sh
 #
