@@ -1,0 +1,202 @@
+name: Deploy
+
+# Builds the production image and deploys it to Google Cloud Run after CI
+# passes on main. Replaces Vercel's deploy-on-push (the Vercel team was paused
+# on 2026-11-12; the site has run on Cloud Run since 2026-11-16).
+#
+# Same build and flags as scripts/deploy-cloud-run.sh, which stays as the
+# manual fallback. Runtime env vars and secrets live on the Cloud Run service
+# (scripts/set-cloud-run-secrets.sh) and `gcloud run deploy` keeps them as
+# they are. Public access is a persistent service setting
+# (--no-invoker-iam-check), so there is no --allow-unauthenticated here: the
+# howellandgibbs.com org blocks `allUsers` grants.
+#
+# Never pass --ingress here. The $0 spend kill switch stops the site by
+# setting the service's ingress to internal-only, and `gcloud run deploy`
+# without --ingress keeps whatever is set, so a merge can't quietly bring a
+# stopped site back. While ingress is not `all`, the deploy still rolls out
+# and the health check is skipped with a warning.
+#
+# Auth is Workload Identity Federation: no JSON key exists. GitHub's OIDC
+# token is exchanged for the github-deploy service account, and the pool's
+# provider only accepts tokens minted for this repository (by numeric id), on
+# refs/heads/main, by this workflow file. Renaming or moving this file breaks
+# auth until the provider's attribute condition is updated to match.
+#
+# One-time setup (already done):
+#   - Repo variables NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY,
+#     NEXT_PUBLIC_GOOGLE_CLIENT_ID. They are inlined into the browser bundle
+#     at build time, so they are public values, not secrets.
+#   - GCP: pool `github`, provider `govroll`, service account github-deploy
+#     with Artifact Registry writer on repo `govroll`, Cloud Run developer on
+#     service `govroll`, and Service Account User on the runtime service
+#     account. Nothing is granted at the project level.
+#   - Artifact Registry cleanup policy on repo `govroll`: keep the 3 newest
+#     images and delete the rest, so storage stays inside the 0.5 GB free
+#     tier. Rolling traffic back further than 3 deploys means redeploying.
+#
+# Manual redeploy of main: Actions > Deploy > Run workflow. That path skips
+# the CI gate, so use it only for a commit whose CI already passed.
+#
+# A failing CI job on main blocks the deploy, including "Migration tracker
+# drift": apply the migration to prod first, then re-run the failed CI jobs
+# and this workflow follows.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One deploy at a time, in order; a newer queued run replaces an older queued
+# one, never one that is already deploying.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: govroll-web-261112
+  REGION: us-west1
+  SERVICE: govroll
+  IMAGE: us-west1-docker.pkg.dev/govroll-web-261112/govroll/web
+  WIF_PROVIDER: projects/458661638149/locations/global/workloadIdentityPools/github/providers/govroll
+  DEPLOY_SA: github-deploy@govroll-web-261112.iam.gserviceaccount.com
+  HEALTH_URL: https://www.govroll.com/api/health
+
+jobs:
+  deploy:
+    name: Deploy to Cloud Run
+    # Only a CI run for a push to main in this repository (not a pull request,
+    # and not a fork's branch that happens to be called main).
+    if: >-
+      github.ref == 'refs/heads/main' && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # mint the OIDC token Workload Identity Federation exchanges
+    env:
+      # workflow_run runs on the default branch's latest commit; deploy the
+      # commit CI actually tested.
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Check build variables
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
+        run: |
+          missing=0
+          for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY NEXT_PUBLIC_GOOGLE_CLIENT_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repo variable $name is not set (Settings > Secrets and variables > Actions > Variables)."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          # The checked-out tree, so .dockerignore applies and the image is
+          # built from SHA (the default Git context would fetch github.sha).
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.SHA }}
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+            NEXT_PUBLIC_GOOGLE_CLIENT_ID=${{ vars.NEXT_PUBLIC_GOOGLE_CLIENT_ID }}
+          # A plain single-platform manifest, like the manual script's.
+          provenance: false
+          cache-from: type=gha,scope=deploy
+          cache-to: type=gha,scope=deploy,mode=max
+
+      # Same flags as scripts/deploy-cloud-run.sh; see the comments there.
+      # No --ingress: see the kill-switch note at the top of this file.
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --image "${IMAGE}:${SHA}" \
+            --port 8080 \
+            --cpu 1 \
+            --memory 1Gi \
+            --concurrency 40 \
+            --min-instances 0 \
+            --max-instances 3 \
+            --timeout 300 \
+            --quiet
+
+      - name: Verify revision and health
+        run: |
+          gcloud run services describe "$SERVICE" \
+            --project "$PROJECT_ID" --region "$REGION" --format=json > service.json
+          revision="$(jq -r '.status.latestReadyRevisionName' service.json)"
+          jq -e --arg image "${IMAGE}:${SHA}" --arg revision "$revision" '
+            .spec.template.spec.containers[0].image == $image and
+            .status.latestCreatedRevisionName == $revision and
+            ([.status.traffic[] | select(.revisionName == $revision or .latestRevision == true) | .percent] | add) == 100
+          ' service.json > /dev/null || {
+            echo "::error::Revision $revision is not serving 100% of traffic with ${IMAGE}:${SHA}."
+            jq '{image: .spec.template.spec.containers[0].image, latestCreated: .status.latestCreatedRevisionName, latestReady: .status.latestReadyRevisionName, traffic: .status.traffic}' service.json
+            exit 1
+          }
+
+          ingress="$(jq -r '.metadata.annotations["run.googleapis.com/ingress"] // "all"' service.json)"
+          if [ "$ingress" != "all" ]; then
+            echo "::warning::Deployed revision $revision, but service ingress is '$ingress' (spend kill switch?), so the site is not public. Skipping the health check."
+            {
+              echo "### Deployed \`${SHA:0:7}\`, site not public"
+              echo "- Image: \`${IMAGE}:${SHA}\`"
+              echo "- Revision: \`${revision}\` (100% of traffic)"
+              echo "- Ingress is \`${ingress}\`, so ${HEALTH_URL} was not checked."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          for attempt in $(seq 1 12); do
+            body="$(curl -sS --max-time 20 "$HEALTH_URL" || true)"
+            if printf '%s' "$body" | jq -e '.status == "ok" and .db == "ok"' > /dev/null 2>&1; then
+              echo "Health OK: $body"
+              {
+                echo "### Deployed \`${SHA:0:7}\`"
+                echo "- Image: \`${IMAGE}:${SHA}\`"
+                echo "- Revision: \`${revision}\` (100% of traffic)"
+                echo "- Health: \`${body}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Attempt $attempt: health not ok yet: ${body:-no response}"
+            sleep 10
+          done
+          echo "::error::$HEALTH_URL did not report status ok and db ok after the deploy."
+          exit 1
