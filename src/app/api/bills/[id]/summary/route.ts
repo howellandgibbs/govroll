@@ -11,6 +11,7 @@ import {
   getClientIp,
   RateLimitError,
 } from "@/lib/rate-limit";
+import { cpuThrottledAfterResponse } from "@/lib/hosting";
 
 /**
  * POST /api/bills/[id]/summary
@@ -18,8 +19,10 @@ import {
  * Idempotently ensures an AI change-summary exists (or is being generated)
  * for the latest substantive version of the given bill. On first call this
  * kicks off generation via `after()` — the response returns immediately
- * (`status: "pending"`) while Fluid Compute finishes the AI call in the
- * background. Subsequent calls are safe, cheap status-polls.
+ * (`status: "pending"`) while the server finishes the AI call in the
+ * background. On Cloud Run, which throttles CPU after the response, the first
+ * call instead waits for generation and returns the finished state.
+ * Subsequent calls are safe, cheap status-polls.
  *
  * Response shapes:
  *   { status: "ready",         summary, versionCode, versionType, versionDate }
@@ -89,9 +92,15 @@ export async function POST(
   const outcome = await ensureSummaryJob(billId);
 
   if (outcome.started) {
+    if (cpuThrottledAfterResponse()) {
+      // Cloud Run throttles CPU once the response is sent, so generate inside
+      // the request (a few seconds of Haiku) and return the finished state.
+      await generateSummaryForVersion(outcome.versionId);
+      return NextResponse.json(await readSummaryState(billId));
+    }
     // Fire-and-forget generation; response returns to the client while the
-    // Fluid instance keeps the handle alive. If the instance crashes mid-run
-    // the STALE_PENDING_MS fallback lets the next caller retry.
+    // instance keeps the handle alive. If the instance crashes mid-run the
+    // STALE_PENDING_MS fallback lets the next caller retry.
     after(generateSummaryForVersion(outcome.versionId));
   }
 

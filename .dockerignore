@@ -1,0 +1,13 @@
+.git
+.github
+.next
+.vercel
+.claude
+node_modules
+coverage
+playwright-report
+test-results
+src/generated
+.env
+.env.*
+*.log
