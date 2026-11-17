@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { fetchBillTextFunction } from "@/scripts/fetch-bill-text";
 import { parseBillIdentifier } from "@/lib/bills/url";
 import { getCurrentCongress } from "@/lib/momentum";
+import { cpuThrottledAfterResponse } from "@/lib/hosting";
 
 /**
  * Cold-start threshold — if we haven't tried to fetch a bill's text within
@@ -61,6 +62,11 @@ export function maybeFetchBillTextInBackground(bill: {
   textFetchAttemptedAt: Date | null;
 }): void {
   if (bill.hasFullText) return;
+
+  // On Cloud Run the after() task would stall once the page is sent (see
+  // lib/hosting), after already claiming the attempt timestamp. Leave missing
+  // text to the hourly backfill-bill-text cron there.
+  if (cpuThrottledAfterResponse()) return;
 
   if (bill.textFetchAttemptedAt != null && isFromEndedCongress(bill.billId)) {
     return;

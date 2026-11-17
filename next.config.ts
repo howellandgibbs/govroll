@@ -15,6 +15,9 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // Self-hosted on Google Cloud Run (see Dockerfile): emit a minimal server.js
+  // plus only the node_modules it needs, so the image stays small.
+  output: "standalone",
   images: {
     remotePatterns: [
       {
@@ -24,6 +27,16 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+  // Vercel's domain settings used to send the apex to www; on Cloud Run both
+  // hostnames reach this server, so the app does it.
+  redirects: async () => [
+    {
+      source: "/:path*",
+      has: [{ type: "host", value: "govroll.com" }],
+      destination: "https://www.govroll.com/:path*",
+      permanent: true,
+    },
+  ],
   headers: async () => [
     {
       source: "/:path*",

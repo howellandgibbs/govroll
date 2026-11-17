@@ -105,6 +105,30 @@ describe("POST /api/bills/[id]/summary", () => {
     expect(afterMock).toHaveBeenCalledTimes(1);
   });
 
+  it("on Cloud Run, generates inside the request and returns the finished state", async () => {
+    vi.stubEnv("K_SERVICE", "govroll");
+    try {
+      readSummaryStateMock
+        .mockResolvedValueOnce(NOT_GENERATED)
+        .mockResolvedValueOnce(READY);
+      ensureSummaryJobMock.mockResolvedValue({
+        started: true,
+        versionId: 7,
+        state: PENDING,
+      });
+      generateSummaryForVersionMock.mockResolvedValue(undefined);
+
+      const res = await POST(makeRequest("cloud-run-1"), makeParams("1"));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(READY);
+      expect(generateSummaryForVersionMock).toHaveBeenCalledWith(7);
+      expect(afterMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("does not re-trigger generation for a poll of an already-ready summary", async () => {
     readSummaryStateMock.mockResolvedValue(READY);
 
