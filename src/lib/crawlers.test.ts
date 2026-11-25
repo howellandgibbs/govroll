@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import robots from "@/app/robots";
-import { AI_TRAINING_CRAWLERS, SEO_TOOL_CRAWLERS } from "./crawlers";
+import {
+  AI_TRAINING_CRAWLERS,
+  COSTLY_CRAWLERS,
+  SEO_TOOL_CRAWLERS,
+} from "./crawlers";
 
 type Rule = { userAgent?: string | string[]; disallow?: string | string[] };
 
@@ -23,11 +27,16 @@ function blockedEverywhere(): string[] {
 }
 
 describe("robots.txt crawler policy", () => {
-  it("blocks every AI training and SEO-tool crawler site-wide", () => {
+  it("blocks every AI training, SEO-tool and costly crawler site-wide", () => {
     const blocked = blockedEverywhere();
-    for (const ua of [...AI_TRAINING_CRAWLERS, ...SEO_TOOL_CRAWLERS]) {
+    for (const ua of [
+      ...AI_TRAINING_CRAWLERS,
+      ...SEO_TOOL_CRAWLERS,
+      ...COSTLY_CRAWLERS,
+    ]) {
       expect(blocked).toContain(ua);
     }
+    expect(blocked).toContain("meta-webindexer");
   });
 
   it.each([
