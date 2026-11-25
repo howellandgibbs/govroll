@@ -9,8 +9,8 @@
 
 /**
  * AI *training* crawlers. The ones that ignore robots.txt (Bytespider, …) are
- * also denied at the edge by the Vercel Firewall rule "Block AI training
- * crawlers" — keep the two in sync.
+ * also denied at the edge by the Cloudflare WAF user-agent block rule — keep
+ * the two in sync.
  */
 export const AI_TRAINING_CRAWLERS = [
   "GPTBot", // OpenAI training (OAI-SearchBot / ChatGPT-User stay allowed)
@@ -42,7 +42,7 @@ export const AI_TRAINING_CRAWLERS = [
 /**
  * Commercial SEO-tool crawlers. They send no readers, and were the heaviest
  * identified bot traffic (SemrushBot alone ~720 requests/day in Sep 2026).
- * SERankingBacklinksBot is also denied by the firewall rule above: it swept
+ * SERankingBacklinksBot is also denied by the Cloudflare WAF rule: it swept
  * ~13.6k bill pages in a day (2026-11-08) and pushed Active CPU near the cap.
  */
 export const SEO_TOOL_CRAWLERS = [
@@ -54,4 +54,19 @@ export const SEO_TOOL_CRAWLERS = [
   "DataForSeoBot",
   "BLEXBot",
   "SERankingBacklinksBot",
+];
+
+/**
+ * Crawlers blocked for cost alone, even though they serve AI *search* and so
+ * would otherwise be allowed. govroll's hosting (Google Cloud Run) has a
+ * 1 GB/month free allowance for outbound data and a $0 spend limit that takes
+ * the site offline when exceeded. Also denied at the edge by the Cloudflare
+ * WAF user-agent block rule; keep the two in sync.
+ */
+export const COSTLY_CRAWLERS = [
+  // Meta AI search indexer, from Meta's own IPs (2a03:2880::/32, 57.141.x).
+  // On 2026-11-18 it fetched ~40k bill pages a day, ~90% of all traffic,
+  // and on pace for ~19 GB/month outbound. Its link-preview fetcher
+  // facebookexternalhit stays allowed.
+  "meta-webindexer",
 ];

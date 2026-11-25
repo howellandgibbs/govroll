@@ -1,17 +1,25 @@
 import type { MetadataRoute } from "next";
-import { AI_TRAINING_CRAWLERS, SEO_TOOL_CRAWLERS } from "@/lib/crawlers";
+import {
+  AI_TRAINING_CRAWLERS,
+  COSTLY_CRAWLERS,
+  SEO_TOOL_CRAWLERS,
+} from "@/lib/crawlers";
 
 /**
- * Search engines and AI search bots crawl everything public; AI training and
- * SEO-tool crawlers are disallowed site-wide (see lib/crawlers). govroll runs
- * on Vercel's free tier, whose Active CPU and ISR budgets were being
- * exhausted by crawlers sweeping ~43k bill pages.
+ * Search engines and AI search bots crawl everything public; AI training,
+ * SEO-tool and a few costly crawlers are disallowed site-wide (see
+ * lib/crawlers). govroll runs on free tiers, and crawlers sweeping its ~43k
+ * bill pages are what has pushed it past them.
  */
 export default function robots(): MetadataRoute.Robots {
   return {
     rules: [
       {
-        userAgent: [...AI_TRAINING_CRAWLERS, ...SEO_TOOL_CRAWLERS],
+        userAgent: [
+          ...AI_TRAINING_CRAWLERS,
+          ...SEO_TOOL_CRAWLERS,
+          ...COSTLY_CRAWLERS,
+        ],
         disallow: "/",
       },
       {
